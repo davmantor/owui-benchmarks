@@ -41,7 +41,8 @@ class BrowserClient:
         "login_button": 'button[type="submit"]',
         "chat_input": '[contenteditable="true"]',
         "send_button": 'button[type="submit"]:has(svg), button[aria-label*="Send"]',
-        "new_chat_button": 'button:has-text("New Chat"), a[href="/"]',
+        # Open WebUI variants often render this as an icon-only button with aria-label.
+        "new_chat_button": 'button[aria-label*="New Chat" i], button:has-text("New Chat"), a[href="/"]',
         "model_selector": 'button[aria-label*="Model"], .model-selector, [data-testid="model-selector"]',
         "model_option": 'div[role="option"], button[role="menuitem"]',
         # Exclude the composer wrapper (`#message-input-container`), which also matches the prefix.
@@ -259,20 +260,51 @@ class BrowserClient:
     
     async def start_new_chat(self) -> bool:
         """Start a new chat session."""
-        try:
-            new_chat_btn = await self.page.wait_for_selector(
-                self.SELECTORS["new_chat_button"],
-                state="visible",
-                timeout=5000,
-            )
-            if new_chat_btn:
-                await new_chat_btn.click()
-                # Give the app a moment to navigate/reset the chat composer.
+        async def _click_locator(locator, timeout_ms: int = 1500) -> bool:
+            try:
+                count = await locator.count()
+                if count == 0:
+                    return False
+                target = locator.first
+                await target.wait_for(state="visible", timeout=timeout_ms)
+                await target.click(timeout=timeout_ms)
+                return True
+            except Exception:
+                return False
+
+        # Try multiple strategies because Open WebUI changes this control frequently
+        # (icon-only button, header action, hidden sentinel buttons, or menu entry).
+        strategies = [
+            lambda: self.page.get_by_role("button", name=re.compile(r"new chat", re.I)),
+            lambda: self.page.locator('button[aria-label*="New Chat" i]'),
+            lambda: self.page.locator("#new-chat-button:not(.hidden), #sidebar-new-chat-button:not(.hidden)"),
+            lambda: self.page.locator('button:has-text("New Chat")'),
+            lambda: self.page.locator('a[href="/"]'),
+        ]
+
+        for make_locator in strategies:
+            locator = make_locator()
+            if await _click_locator(locator):
                 await self.page.wait_for_timeout(800)
                 return True
-            return False
+
+        # Some builds place New Chat in the chat context menu.
+        try:
+            context_menu_btn = self.page.locator("#chat-context-menu-button")
+            if await _click_locator(context_menu_btn):
+                menu_new_chat = self.page.get_by_role("menuitem", name=re.compile(r"new chat", re.I))
+                if await _click_locator(menu_new_chat, timeout_ms=2000):
+                    await self.page.wait_for_timeout(800)
+                    return True
+                # Fallback for non-menuitem implementations
+                menu_new_chat_btn = self.page.get_by_role("button", name=re.compile(r"new chat", re.I))
+                if await _click_locator(menu_new_chat_btn, timeout_ms=2000):
+                    await self.page.wait_for_timeout(800)
+                    return True
         except Exception:
-            return False
+            pass
+
+        return False
     
     async def send_message_and_wait(
         self,
