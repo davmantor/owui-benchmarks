@@ -115,7 +115,7 @@ class BrowserBenchmarkConfig(BaseModel):
     slow_mo: int = 0  # Slow down operations by ms (for debugging)
     viewport_width: int = 1280
     viewport_height: int = 720
-    browser_timeout: float = 30000  # Timeout in milliseconds
+    browser_timeout: float = 120000  # Timeout in milliseconds
     screenshot_on_error: bool = False  # Take screenshot when errors occur
     use_isolated_browsers: bool = False  # Use separate browser instances vs contexts
 
@@ -234,6 +234,7 @@ class ConfigLoader:
         output_data = data.get("output", {})
         thresholds_data = data.get("thresholds", {})
         channels_data = data.get("channels", {})
+        browser_data = data.get("browser", {})
         test_users_data = data.get("test_users", {})
         
         # Apply environment variable overrides for target URL
@@ -293,6 +294,7 @@ class ConfigLoader:
             thresholds=ThresholdsConfig(**thresholds_data) if thresholds_data else ThresholdsConfig(),
             channels=channels_config,
             chat=chat_config,
+            browser=BrowserBenchmarkConfig(**browser_data) if browser_data else BrowserBenchmarkConfig(),
             compute_profile=self.get_compute_profile(profile_id),
             use_single_user=use_single_user,
         )

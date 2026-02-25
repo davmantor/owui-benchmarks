@@ -41,8 +41,11 @@ class BrowserClient:
         "new_chat_button": 'button:has-text("New Chat"), a[href="/"]',
         "model_selector": 'button[aria-label*="Model"], .model-selector, [data-testid="model-selector"]',
         "model_option": 'div[role="option"], button[role="menuitem"]',
-        "message_container": '[id^="message-"]',
+        # Exclude the composer wrapper (`#message-input-container`), which also matches the prefix.
+        "message_container": '[id^="message-"]:not(#message-input-container)',
         "response_prose": '.prose',
+        "response_content_container": '#response-content-container',
+        "assistant_message": '.chat-assistant',
         "streaming_indicator": '.typing-indicator, [class*="loading"], [class*="streaming"]',
     }
     
@@ -211,6 +214,8 @@ class BrowserClient:
         """Send a message and wait for streaming response. Returns timing metrics."""
         start_time = time.time()
         first_token_time: Optional[float] = None
+        poll_interval_s = 0.1
+        max_stable_checks = 30  # ~3s of stable content before considering response complete
         
         try:
             chat_input = await self.page.wait_for_selector(
@@ -246,19 +251,45 @@ class BrowserClient:
             content = ""
             last_content_length = 0
             stable_count = 0
-            max_stable_checks = 5  # 500ms of stable content = done
             response_element = None
-            found_response = False
+            timed_out = True
+            saw_assistant_message = False
+            saw_streaming_ui = False
             
             while (time.time() - send_time) * 1000 < timeout_ms:
                 current_messages = await self.page.query_selector_all(self.SELECTORS["message_container"])
-                
+
+                response_message = None
+
+                # Primary heuristic: expect one new user row + one new assistant row.
                 if len(current_messages) >= target_message_count:
                     response_message = current_messages[-1]
+
+                # Fallback heuristic: locate the most recent row that contains assistant markup.
+                if response_message is None and current_messages:
+                    for msg in reversed(current_messages):
+                        try:
+                            assistant_node = await msg.query_selector(self.SELECTORS["assistant_message"])
+                            if assistant_node:
+                                response_message = msg
+                                break
+                        except Exception:
+                            continue
+
+                if response_message is not None:
+                    saw_assistant_message = True
                     
                     # Find content element if not yet found
                     if response_element is None:
                         response_element = await response_message.query_selector(self.SELECTORS["response_prose"])
+                        if not response_element:
+                            response_element = await response_message.query_selector(
+                                self.SELECTORS["response_content_container"]
+                            )
+                        if not response_element:
+                            response_element = await response_message.query_selector(
+                                self.SELECTORS["assistant_message"]
+                            )
                         if not response_element:
                             # Try fallback selectors
                             alternatives = [
@@ -292,29 +323,88 @@ class BrowserClient:
                                 response_element = response_message
                     
                     if response_element:
+                        try:
+                            indicator = await response_message.query_selector(self.SELECTORS["streaming_indicator"])
+                            if indicator and await indicator.is_visible():
+                                saw_streaming_ui = True
+                        except Exception:
+                            pass
+
                         current_content = await response_element.inner_text() or ""
-                        
-                        if first_token_time is None and len(current_content.strip()) > 0:
+                        current_content_stripped = current_content.strip()
+
+                        if first_token_time is None and len(current_content_stripped) > 0:
                             first_token_time = time.time()
                         
                         content = current_content
                         
-                        # Check if streaming is complete (content stable for 500ms)
-                        if len(content) == last_content_length and len(content) > 0:
+                        # Check if streaming is complete (content stable for ~3s)
+                        if (
+                            len(content) == last_content_length
+                            and len(current_content_stripped) > 0
+                        ):
                             stable_count += 1
                             if stable_count >= max_stable_checks:
-                                break
+                                # Prefer a stronger completion signal when available:
+                                # if a loading/streaming indicator is visible, keep waiting.
+                                try:
+                                    indicator = await self.page.query_selector(self.SELECTORS["streaming_indicator"])
+                                    if indicator and await indicator.is_visible():
+                                        stable_count = 0
+                                    else:
+                                        timed_out = False
+                                        break
+                                except Exception:
+                                    # If indicator detection is unreliable, fall back to stable-content heuristic.
+                                    timed_out = False
+                                    break
                         else:
                             stable_count = 0
                             last_content_length = len(content)
                 
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(poll_interval_s)
             
             end_time = time.time()
             
             total_duration_ms = (end_time - send_time) * 1000
             ttft_ms = (first_token_time - send_time) * 1000 if first_token_time else total_duration_ms
             tokens_rendered = len(content) // 4 if content else 0  # ~4 chars per token
+
+            content_stripped = content.strip()
+            if not content_stripped:
+                if timed_out and saw_assistant_message:
+                    timeout_reason = "Timed out waiting for first assistant token"
+                    if saw_streaming_ui:
+                        timeout_reason += " (assistant was still streaming/thinking)"
+                    return BrowserChatResult(
+                        content=content,
+                        ttft_ms=ttft_ms,
+                        total_duration_ms=total_duration_ms,
+                        tokens_rendered=0,
+                        success=False,
+                        error=timeout_reason,
+                    )
+                return BrowserChatResult(
+                    content=content,
+                    ttft_ms=ttft_ms,
+                    total_duration_ms=total_duration_ms,
+                    tokens_rendered=0,
+                    success=False,
+                    error=(
+                        "No assistant response content detected "
+                        f"(assistant_seen={saw_assistant_message}, timed_out={timed_out})"
+                    ),
+                )
+
+            if timed_out:
+                return BrowserChatResult(
+                    content=content,
+                    ttft_ms=ttft_ms,
+                    total_duration_ms=total_duration_ms,
+                    tokens_rendered=tokens_rendered,
+                    success=False,
+                    error="Timed out before response completion (partial response possible)",
+                )
             
             return BrowserChatResult(
                 content=content,

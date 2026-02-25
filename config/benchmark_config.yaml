@@ -93,3 +93,6 @@ thresholds:
   
   # Minimum acceptable requests per second
   min_requests_per_second: 10
+
+browser:
+  screenshot_on_error: true

@@ -8,6 +8,8 @@ optionally auto-scaling to find the maximum sustainable user count.
 import asyncio
 import random
 import signal
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from rich.console import Console
@@ -422,6 +424,42 @@ class ChatUIBenchmark(BaseBenchmark):
         def update_status():
             progress.update(task, completed=completed + errors,
                           description=f"Done: {completed} | Errors: {errors}")
+
+        async def capture_failure_debug(client: BrowserClient, user_num: int, req_num: int, error_msg: str):
+            """Print immediate debug info and optionally capture artifacts on UI failures."""
+            try:
+                current_url = client.page.url
+            except Exception:
+                current_url = "<unavailable>"
+
+            console.print(
+                f"[red]UI request failed[/red] "
+                f"(user={user_num}, request={req_num}) "
+                f"url={current_url} error={error_msg}"
+            )
+
+            if not self.config.browser.screenshot_on_error:
+                return
+
+            try:
+                debug_dir = Path(self.config.output.results_dir) / "chat_ui_debug"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+                base = f"u{user_num}_r{req_num}_{ts}"
+
+                screenshot_path = debug_dir / f"{base}.png"
+                await client.take_screenshot(str(screenshot_path))
+                console.print(f"[dim]Saved screenshot: {screenshot_path}[/dim]")
+
+                try:
+                    html = await client.page.content()
+                    html_path = debug_dir / f"{base}.html"
+                    html_path.write_text(html, encoding="utf-8")
+                    console.print(f"[dim]Saved page HTML: {html_path}[/dim]")
+                except Exception as html_err:
+                    console.print(f"[yellow]Debug HTML capture failed: {html_err}[/yellow]")
+            except Exception as debug_err:
+                console.print(f"[yellow]Debug artifact capture failed: {debug_err}[/yellow]")
         
         async def run_user_session(client: BrowserClient, user_num: int):
             nonlocal completed, errors
@@ -452,6 +490,7 @@ class ChatUIBenchmark(BaseBenchmark):
                         )
                         completed += 1
                     else:
+                        await capture_failure_debug(client, user_num, req_num, result.error or "Unknown error")
                         metrics.record_streaming_timing(
                             operation="chat_completion_ui",
                             duration_ms=result.total_duration_ms,
@@ -466,6 +505,7 @@ class ChatUIBenchmark(BaseBenchmark):
                     update_status()
                     
                 except Exception as e:
+                    await capture_failure_debug(client, user_num, req_num, str(e))
                     metrics.record_streaming_timing(
                         operation="chat_completion_ui",
                         duration_ms=0,

@@ -253,8 +253,10 @@ async def run_chat_ui_benchmark(
     target_url: Optional[str] = None,
     max_users: Optional[int] = None,
     model: Optional[str] = None,
+    requests_per_user: Optional[int] = None,
     headless: bool = True,
     slow_mo: int = 0,
+    browser_timeout: Optional[int] = None,
     auto_scale: bool = False,
     response_threshold: int = 1000,
     step_size: Optional[int] = None,
@@ -282,10 +284,15 @@ async def run_chat_ui_benchmark(
     
     if model:
         config.chat.model = model
-    
+
+    if requests_per_user:
+        config.chat.requests_per_user = requests_per_user
+
     # Browser-specific settings
     config.browser.headless = headless
     config.browser.slow_mo = slow_mo
+    if browser_timeout:
+        config.browser.browser_timeout = browser_timeout
     
     # Create runner
     runner = BenchmarkRunner(
@@ -418,6 +425,11 @@ def main():
         help="Model to use for chat benchmarks (default: gpt-4o-mini)",
     )
     run_parser.add_argument(
+        "--requests-per-user",
+        type=int,
+        help="Number of chat requests to send per user/session (chat benchmarks)",
+    )
+    run_parser.add_argument(
         "-o", "--output",
         help="Output directory for results",
     )
@@ -439,6 +451,11 @@ def main():
         type=int,
         default=0,
         help="Slow down browser operations by ms (for debugging)",
+    )
+    run_parser.add_argument(
+        "--browser-timeout",
+        type=int,
+        help="UI chat response timeout in ms for chat-ui benchmark",
     )
     
     # Auto-scaling options for chat-ui (auto-scale is default unless --max-users is specified)
@@ -506,8 +523,10 @@ def main():
                     target_url=args.url,
                     max_users=args.max_users,
                     model=args.model,
+                    requests_per_user=getattr(args, 'requests_per_user', None),
                     headless=headless,
                     slow_mo=getattr(args, 'slow_mo', 0),
+                    browser_timeout=getattr(args, 'browser_timeout', None),
                     auto_scale=auto_scale,
                     response_threshold=getattr(args, 'response_threshold', 1000),
                     step_size=args.step_size,
