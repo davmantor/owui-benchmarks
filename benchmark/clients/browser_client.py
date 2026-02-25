@@ -218,7 +218,7 @@ class BrowserClient:
         start_time = time.time()
         first_token_time: Optional[float] = None
         poll_interval_s = 0.1
-        max_stable_checks = 30  # ~3s of stable content before considering response complete
+        max_stable_checks = 10  # ~1s of stable content before considering response complete
         first_token_timeout_ms = first_token_timeout_ms or timeout_ms
         completion_timeout_ms = completion_timeout_ms or timeout_ms
         
@@ -356,7 +356,7 @@ class BrowserClient:
                         
                         content = current_content
                         
-                        # Check if streaming is complete (content stable for ~3s)
+                        # Check if streaming is complete (content stable for ~1s)
                         if (
                             len(content) == last_content_length
                             and len(current_content_stripped) > 0
