@@ -101,11 +101,11 @@ class ChatBenchmarkConfig(BaseModel):
         "What events are happening this week?",
         "I’m into art and design — what should I check out?",
         "Any low-commitment volunteer opportunities?",
-        "Clubs related to AI or machine learning?",
-        "How can I find study groups for my major?",
+        "Courses related to AI or machine learning",
+        "Help me find a class about whales",
         "What are some fun outdoor activities on campus?",
         "I want to explore entrepreneurship — where do I start?",
-        "Are there communities for transfer students?"
+        "Are there any classes on data science?"
     ])
 
 
@@ -115,7 +115,7 @@ class BrowserBenchmarkConfig(BaseModel):
     slow_mo: int = 0  # Slow down operations by ms (for debugging)
     viewport_width: int = 1280
     viewport_height: int = 720
-    browser_timeout: float = 120000  # Timeout in milliseconds
+    browser_timeout: float = 20000  # Timeout in milliseconds
     screenshot_on_error: bool = False  # Take screenshot when errors occur
     use_isolated_browsers: bool = False  # Use separate browser instances vs contexts
 

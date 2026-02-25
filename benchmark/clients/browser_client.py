@@ -200,7 +200,8 @@ class BrowserClient:
             )
             if new_chat_btn:
                 await new_chat_btn.click()
-                await self.page.wait_for_timeout(500)
+                # Give the app a moment to navigate/reset the chat composer.
+                await self.page.wait_for_timeout(800)
                 return True
             return False
         except Exception:

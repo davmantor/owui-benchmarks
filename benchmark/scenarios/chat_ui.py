@@ -471,8 +471,20 @@ class ChatUIBenchmark(BaseBenchmark):
                 user_prompt = random.choice(chat_config.prompt_pool)
                 
                 try:
+                    console.print(
+                        f"[dim]User {user_num + 1}: request {req_num + 1}/{requests_per_user} starting[/dim]"
+                    )
+
                     if req_num > 0:
-                        await client.start_new_chat()
+                        started_new_chat = await client.start_new_chat()
+                        if not started_new_chat:
+                            console.print(
+                                f"[yellow]User {user_num + 1}: could not click New Chat; continuing in current chat[/yellow]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]User {user_num + 1}: opened new chat[/dim]"
+                            )
                     
                     result = await client.send_message_and_wait(
                         message=user_prompt,
@@ -489,6 +501,10 @@ class ChatUIBenchmark(BaseBenchmark):
                             metadata={"user": user_num, "request": req_num},
                         )
                         completed += 1
+                        console.print(
+                            f"[dim]User {user_num + 1}: request {req_num + 1} complete "
+                            f"({result.total_duration_ms:.0f}ms, ttft={result.ttft_ms:.0f}ms)[/dim]"
+                        )
                     else:
                         await capture_failure_debug(client, user_num, req_num, result.error or "Unknown error")
                         metrics.record_streaming_timing(
