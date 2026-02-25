@@ -73,6 +73,7 @@ class BenchmarkResult:
     max_ttft_ms: float = 0.0
     p50_ttft_ms: float = 0.0
     p95_ttft_ms: float = 0.0
+    p99_ttft_ms: float = 0.0
     avg_tokens_per_second: float = 0.0
     total_tokens_generated: int = 0
     
@@ -121,6 +122,7 @@ class BenchmarkResult:
             "max_ttft_ms": round(self.max_ttft_ms, 2),
             "p50_ttft_ms": round(self.p50_ttft_ms, 2),
             "p95_ttft_ms": round(self.p95_ttft_ms, 2),
+            "p99_ttft_ms": round(self.p99_ttft_ms, 2),
             "avg_tokens_per_second": round(self.avg_tokens_per_second, 2),
             "total_tokens_generated": self.total_tokens_generated,
             # Throughput
@@ -346,6 +348,7 @@ class MetricsCollector:
             sorted_ttft = sorted(ttft_values)
             result.p50_ttft_ms = self._percentile(sorted_ttft, 50)
             result.p95_ttft_ms = self._percentile(sorted_ttft, 95)
+            result.p99_ttft_ms = self._percentile(sorted_ttft, 99)
         
         # Calculate tokens per second and total tokens
         tps_values = [
@@ -479,6 +482,7 @@ class ResultsWriter:
             "total_requests", "successful_requests", "failed_requests",
             "avg_response_time_ms", "min_response_time_ms", "max_response_time_ms",
             "p50_response_time_ms", "p95_response_time_ms", "p99_response_time_ms",
+            "avg_ttft_ms", "p50_ttft_ms", "p95_ttft_ms", "p99_ttft_ms",
             "requests_per_second", "error_rate_percent", "passed",
             "peak_cpu_percent", "peak_memory_mb",
         ]
@@ -522,6 +526,9 @@ class ResultsWriter:
                 f"  Success Rate: {100 - result.error_rate_percent:.1f}%",
                 f"  Avg Response Time: {result.avg_response_time_ms:.2f}ms",
                 f"  P95 Response Time: {result.p95_response_time_ms:.2f}ms",
+                f"  Avg TTFT: {result.avg_ttft_ms:.2f}ms",
+                f"  P95 TTFT: {result.p95_ttft_ms:.2f}ms",
+                f"  P99 TTFT: {result.p99_ttft_ms:.2f}ms",
                 f"  Requests/sec: {result.requests_per_second:.2f}",
                 f"  Status: {'PASSED' if result.passed else 'FAILED'}",
                 "",

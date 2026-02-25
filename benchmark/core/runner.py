@@ -159,6 +159,9 @@ class BenchmarkRunner:
         table.add_row("Avg Response Time", f"{result.avg_response_time_ms:.2f} ms")
         table.add_row("P95 Response Time", f"{result.p95_response_time_ms:.2f} ms")
         table.add_row("P99 Response Time", f"{result.p99_response_time_ms:.2f} ms")
+        table.add_row("Avg TTFT", f"{result.avg_ttft_ms:.2f} ms")
+        table.add_row("P95 TTFT", f"{result.p95_ttft_ms:.2f} ms")
+        table.add_row("P99 TTFT", f"{result.p99_ttft_ms:.2f} ms")
         table.add_row("Requests/sec", f"{result.requests_per_second:.2f}")
         
         # Color-code error rate
@@ -221,10 +224,12 @@ class BenchmarkRunner:
         # Summary table
         table = Table(title="Final Results Summary")
         table.add_column("Benchmark", style="cyan")
+        table.add_column("Metric", style="magenta")
         table.add_column("Max Users", justify="right")
         table.add_column("Requests", justify="right")
-        table.add_column("Avg Time", justify="right")
-        table.add_column("P95 Time", justify="right")
+        table.add_column("Avg", justify="right")
+        table.add_column("P95", justify="right")
+        table.add_column("P99", justify="right")
         table.add_column("RPS", justify="right")
         table.add_column("Errors", justify="right")
         
@@ -232,13 +237,27 @@ class BenchmarkRunner:
             error_color = "green" if result.error_rate_percent < 1 else "yellow" if result.error_rate_percent < 5 else "red"
             table.add_row(
                 result.benchmark_name,
+                "Response",
                 str(result.concurrent_users),
                 str(result.total_requests),
                 f"{result.avg_response_time_ms:.0f}ms",
                 f"{result.p95_response_time_ms:.0f}ms",
+                f"{result.p99_response_time_ms:.0f}ms",
                 f"{result.requests_per_second:.1f}",
                 f"[{error_color}]{result.error_rate_percent:.1f}%[/{error_color}]",
             )
+            table.add_row(
+                "",
+                "TTFT",
+                "",
+                "",
+                f"{result.avg_ttft_ms:.0f}ms",
+                f"{result.p95_ttft_ms:.0f}ms",
+                f"{result.p99_ttft_ms:.0f}ms",
+                "",
+                "",
+            )
+            table.add_section()
         
         console.print(table)
         console.print()

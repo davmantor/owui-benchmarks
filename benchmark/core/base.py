@@ -246,6 +246,12 @@ class BaseBenchmark(ABC):
         combined.p50_response_time_ms = sum(r.p50_response_time_ms for r in results) / len(results)
         combined.p95_response_time_ms = sum(r.p95_response_time_ms for r in results) / len(results)
         combined.p99_response_time_ms = sum(r.p99_response_time_ms for r in results) / len(results)
+        combined.avg_ttft_ms = sum(r.avg_ttft_ms for r in results) / len(results)
+        combined.min_ttft_ms = min(r.min_ttft_ms for r in results)
+        combined.max_ttft_ms = max(r.max_ttft_ms for r in results)
+        combined.p50_ttft_ms = sum(r.p50_ttft_ms for r in results) / len(results)
+        combined.p95_ttft_ms = sum(r.p95_ttft_ms for r in results) / len(results)
+        combined.p99_ttft_ms = sum(r.p99_ttft_ms for r in results) / len(results)
         
         # Recalculate derived metrics
         if combined.total_requests > 0:
