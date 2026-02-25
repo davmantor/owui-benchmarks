@@ -489,6 +489,8 @@ class ChatUIBenchmark(BaseBenchmark):
                     result = await client.send_message_and_wait(
                         message=user_prompt,
                         timeout_ms=self.config.browser.browser_timeout,
+                        first_token_timeout_ms=self.config.browser.first_token_timeout_ms,
+                        completion_timeout_ms=self.config.browser.completion_timeout_ms,
                     )
                     
                     if result.success:

@@ -116,6 +116,8 @@ class BrowserBenchmarkConfig(BaseModel):
     viewport_width: int = 1280
     viewport_height: int = 720
     browser_timeout: float = 20000  # Timeout in milliseconds
+    first_token_timeout_ms: Optional[float] = None  # If set, overrides first-token wait
+    completion_timeout_ms: Optional[float] = None  # If set, overrides post-first-token wait
     screenshot_on_error: bool = False  # Take screenshot when errors occur
     use_isolated_browsers: bool = False  # Use separate browser instances vs contexts
 

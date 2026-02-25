@@ -211,12 +211,16 @@ class BrowserClient:
         self,
         message: str,
         timeout_ms: float = 60000,
+        first_token_timeout_ms: Optional[float] = None,
+        completion_timeout_ms: Optional[float] = None,
     ) -> BrowserChatResult:
         """Send a message and wait for streaming response. Returns timing metrics."""
         start_time = time.time()
         first_token_time: Optional[float] = None
         poll_interval_s = 0.1
         max_stable_checks = 30  # ~3s of stable content before considering response complete
+        first_token_timeout_ms = first_token_timeout_ms or timeout_ms
+        completion_timeout_ms = completion_timeout_ms or timeout_ms
         
         try:
             chat_input = await self.page.wait_for_selector(
@@ -252,12 +256,25 @@ class BrowserClient:
             content = ""
             last_content_length = 0
             stable_count = 0
-            response_element = None
             timed_out = True
             saw_assistant_message = False
             saw_streaming_ui = False
             
-            while (time.time() - send_time) * 1000 < timeout_ms:
+            timeout_stage = "unknown"
+
+            while True:
+                now = time.time()
+                elapsed_since_send_ms = (now - send_time) * 1000
+                if first_token_time is None:
+                    if elapsed_since_send_ms >= first_token_timeout_ms:
+                        timeout_stage = "first_token"
+                        break
+                else:
+                    elapsed_since_first_token_ms = (now - first_token_time) * 1000
+                    if elapsed_since_first_token_ms >= completion_timeout_ms:
+                        timeout_stage = "completion"
+                        break
+
                 current_messages = await self.page.query_selector_all(self.SELECTORS["message_container"])
 
                 response_message = None
@@ -280,49 +297,49 @@ class BrowserClient:
                 if response_message is not None:
                     saw_assistant_message = True
                     
-                    # Find content element if not yet found
-                    if response_element is None:
-                        response_element = await response_message.query_selector(self.SELECTORS["response_prose"])
-                        if not response_element:
-                            response_element = await response_message.query_selector(
-                                self.SELECTORS["response_content_container"]
-                            )
-                        if not response_element:
-                            response_element = await response_message.query_selector(
-                                self.SELECTORS["assistant_message"]
-                            )
-                        if not response_element:
-                            # Try fallback selectors
-                            alternatives = [
-                                "div.prose",
-                                "div.markdown",
-                                "div[class*='content']",
-                                "div[class*='markdown']",
-                                "div[class*='response']",
-                                "pre",
-                                "p",
-                            ]
-                            for selector in alternatives:
-                                response_element = await response_message.query_selector(selector)
-                                if response_element:
-                                    test_content = await response_element.inner_text()
-                                    if test_content and len(test_content.strip()) > 1:
-                                        break
-                                    else:
-                                        response_element = None
-                            
-                            if not response_element:
-                                # Try any div with meaningful content
-                                all_divs = await response_message.query_selector_all("div")
-                                for div in all_divs:
-                                    test_content = await div.inner_text()
-                                    if test_content and len(test_content.strip()) > 10:
-                                        response_element = div
-                                        break
-                            
-                            if not response_element:
-                                response_element = response_message
-                    
+                    # Re-resolve the response content element each poll because Open WebUI
+                    # may replace/re-render the assistant subtree during streaming.
+                    response_element = await response_message.query_selector(self.SELECTORS["response_prose"])
+                    if not response_element:
+                        response_element = await response_message.query_selector(
+                            self.SELECTORS["response_content_container"]
+                        )
+                    if not response_element:
+                        response_element = await response_message.query_selector(
+                            self.SELECTORS["assistant_message"]
+                        )
+                    if not response_element:
+                        # Try fallback selectors
+                        alternatives = [
+                            "div.prose",
+                            "div.markdown",
+                            "div[class*='content']",
+                            "div[class*='markdown']",
+                            "div[class*='response']",
+                            "pre",
+                            "p",
+                        ]
+                        for selector in alternatives:
+                            response_element = await response_message.query_selector(selector)
+                            if response_element:
+                                test_content = await response_element.inner_text()
+                                if test_content and len(test_content.strip()) > 1:
+                                    break
+                                else:
+                                    response_element = None
+
+                    if not response_element:
+                        # Try any div with meaningful content
+                        all_divs = await response_message.query_selector_all("div")
+                        for div in all_divs:
+                            test_content = await div.inner_text()
+                            if test_content and len(test_content.strip()) > 10:
+                                response_element = div
+                                break
+
+                    if not response_element:
+                        response_element = response_message
+
                     if response_element:
                         try:
                             indicator = await response_message.query_selector(self.SELECTORS["streaming_indicator"])
@@ -398,13 +415,16 @@ class BrowserClient:
                 )
 
             if timed_out:
+                timeout_reason = "Timed out before response completion (partial response possible)"
+                if "timeout_stage" in locals() and timeout_stage == "completion":
+                    timeout_reason = "Timed out waiting for response completion after first token"
                 return BrowserChatResult(
                     content=content,
                     ttft_ms=ttft_ms,
                     total_duration_ms=total_duration_ms,
                     tokens_rendered=tokens_rendered,
                     success=False,
-                    error="Timed out before response completion (partial response possible)",
+                    error=timeout_reason,
                 )
             
             return BrowserChatResult(

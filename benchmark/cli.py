@@ -257,6 +257,8 @@ async def run_chat_ui_benchmark(
     headless: bool = True,
     slow_mo: int = 0,
     browser_timeout: Optional[int] = None,
+    first_token_timeout: Optional[int] = None,
+    completion_timeout: Optional[int] = None,
     auto_scale: bool = False,
     response_threshold: int = 1000,
     step_size: Optional[int] = None,
@@ -293,6 +295,10 @@ async def run_chat_ui_benchmark(
     config.browser.slow_mo = slow_mo
     if browser_timeout:
         config.browser.browser_timeout = browser_timeout
+    if first_token_timeout:
+        config.browser.first_token_timeout_ms = first_token_timeout
+    if completion_timeout:
+        config.browser.completion_timeout_ms = completion_timeout
     
     # Create runner
     runner = BenchmarkRunner(
@@ -457,6 +463,16 @@ def main():
         type=int,
         help="UI chat response timeout in ms for chat-ui benchmark",
     )
+    run_parser.add_argument(
+        "--first-token-timeout",
+        type=int,
+        help="UI chat timeout in ms waiting for the first assistant token (chat-ui)",
+    )
+    run_parser.add_argument(
+        "--completion-timeout",
+        type=int,
+        help="UI chat timeout in ms after first token while waiting for completion (chat-ui)",
+    )
     
     # Auto-scaling options for chat-ui (auto-scale is default unless --max-users is specified)
     run_parser.add_argument(
@@ -527,6 +543,8 @@ def main():
                     headless=headless,
                     slow_mo=getattr(args, 'slow_mo', 0),
                     browser_timeout=getattr(args, 'browser_timeout', None),
+                    first_token_timeout=getattr(args, 'first_token_timeout', None),
+                    completion_timeout=getattr(args, 'completion_timeout', None),
                     auto_scale=auto_scale,
                     response_threshold=getattr(args, 'response_threshold', 1000),
                     step_size=args.step_size,
