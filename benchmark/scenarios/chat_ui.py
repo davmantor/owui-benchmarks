@@ -206,12 +206,16 @@ class ChatUIBenchmark(BaseBenchmark):
             
             def login_progress(current: int, total: int):
                 progress.update(task, completed=current)
+
+            def login_status(message: str):
+                progress.update(task, description=message)
             
             await self._browser_pool.create_clients(
                 credentials=credentials_to_login,
                 login=True,
-                batch_size=10,
+                batch_size=3,
                 progress_callback=login_progress,
+                status_callback=login_status,
             )
         
         console.print(f"[green]✓[/green] Launched {len(self._browser_pool.clients)} browser sessions")
@@ -292,7 +296,7 @@ class ChatUIBenchmark(BaseBenchmark):
                 await self._browser_pool.create_clients(
                     credentials=additional_creds,
                     login=True,
-                    batch_size=10,
+                    batch_size=3,
                 )
             
             current_users = next_users

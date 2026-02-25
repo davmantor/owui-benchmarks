@@ -115,7 +115,7 @@ class BrowserBenchmarkConfig(BaseModel):
     slow_mo: int = 0  # Slow down operations by ms (for debugging)
     viewport_width: int = 1280
     viewport_height: int = 720
-    browser_timeout: float = 20000  # Timeout in milliseconds
+    browser_timeout: float = 60000  # Timeout in milliseconds
     first_token_timeout_ms: Optional[float] = None  # If set, overrides first-token wait
     completion_timeout_ms: Optional[float] = None  # If set, overrides post-first-token wait
     screenshot_on_error: bool = False  # Take screenshot when errors occur

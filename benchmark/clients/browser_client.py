@@ -110,26 +110,47 @@ class BrowserClient:
         """Check if the client is logged in."""
         return self._is_logged_in
     
-    async def login(self, email: str, password: str, max_retries: int = 5) -> bool:
+    async def login(
+        self,
+        email: str,
+        password: str,
+        max_retries: int = 5,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> bool:
         """Log in to Open WebUI with retry and exponential backoff."""
         last_error = None
         
         for attempt in range(max_retries):
             try:
-                return await self._attempt_login(email, password)
+                if status_callback:
+                    status_callback(f"login attempt {attempt + 1}/{max_retries}")
+                return await self._attempt_login(email, password, status_callback=status_callback)
             except Exception as e:
                 last_error = e
+                if status_callback:
+                    status_callback(f"login attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
                     backoff = 2 ** (attempt + 1)
+                    if status_callback:
+                        status_callback(f"backing off {backoff}s before retry")
                     await asyncio.sleep(backoff)
         
         raise RuntimeError(f"Login failed after {max_retries} attempts: {last_error}")
     
-    async def _attempt_login(self, email: str, password: str) -> bool:
+    async def _attempt_login(
+        self,
+        email: str,
+        password: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> bool:
         """Single login attempt."""
         try:
+            if status_callback:
+                status_callback("navigating to /auth")
             await self.page.goto(f"{self.base_url}/auth", wait_until="domcontentloaded", timeout=60000)
             
+            if status_callback:
+                status_callback("waiting for auth form")
             await self.page.wait_for_selector(
                 self.SELECTORS["email_input"],
                 state="visible",
@@ -137,21 +158,29 @@ class BrowserClient:
             )
             await self.page.wait_for_timeout(500)
             
+            if status_callback:
+                status_callback("submitting credentials")
             await self.page.fill(self.SELECTORS["email_input"], email)
             await self.page.fill(self.SELECTORS["password_input"], password)
             await self.page.click(self.SELECTORS["login_button"])
             
             try:
+                if status_callback:
+                    status_callback("waiting for network idle")
                 await self.page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
             
             # Wait for redirect away from /auth
+            if status_callback:
+                status_callback("waiting for redirect from /auth")
             for _ in range(10):
                 current_url = self.page.url
                 if "/auth" not in current_url:
                     # Look for chat input as indicator of successful login
                     try:
+                        if status_callback:
+                            status_callback("waiting for chat input")
                         await self.page.wait_for_selector(
                             self.SELECTORS["chat_input"],
                             state="visible",
@@ -159,6 +188,8 @@ class BrowserClient:
                         )
                     except Exception:
                         pass  # Chat input not found but we're past auth
+                    if status_callback:
+                        status_callback("login complete")
                     self._is_logged_in = True
                     return True
                 await self.page.wait_for_timeout(500)
@@ -498,10 +529,12 @@ class BrowserPool:
         login: bool = True,
         batch_size: int = 10,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
     ) -> List[BrowserClient]:
         """Create and optionally login browser clients for each credential set."""
         self._user_credentials = credentials
-        self._clients = []        
+        self._clients = []
+
         async def create_context() -> BrowserClient:
             """Create a browser client with a new context."""
             if self.use_isolated_browsers:
@@ -542,36 +575,108 @@ class BrowserPool:
         total = len(credentials)
         completed = 0
         effective_batch_size = batch_size
+        total_batches = (total + effective_batch_size - 1) // effective_batch_size if total else 0
         
-        for batch_start in range(0, total, effective_batch_size):
+        for batch_num, batch_start in enumerate(range(0, total, effective_batch_size), start=1):
             batch_end = min(batch_start + effective_batch_size, total)
             batch_creds = credentials[batch_start:batch_end]
-            
-            batch_tasks = [create_and_login(cred) for cred in batch_creds]
-            batch_clients = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+            if status_callback:
+                action = "Creating/logining" if login else "Creating"
+                status_callback(
+                    f"{action} batch {batch_num}/{total_batches} "
+                    f"({len(batch_creds)} sessions)"
+                )
+
+            async def create_and_login_indexed(i: int, cred: Dict[str, str]):
+                try:
+                    def per_session_status(msg: str):
+                        if status_callback:
+                            status_callback(
+                                f"Session {batch_start + i + 1}/{total}: {msg}"
+                            )
+
+                    per_session_status("creating browser context")
+                    client = await create_context()
+                    if login:
+                        per_session_status("starting login")
+                        await client.login(
+                            cred["email"],
+                            cred["password"],
+                            status_callback=per_session_status,
+                        )
+                    return i, client
+                except Exception as e:
+                    return i, e
+
+            batch_results: List[Any] = [None] * len(batch_creds)
+            batch_tasks = [
+                asyncio.create_task(create_and_login_indexed(i, cred))
+                for i, cred in enumerate(batch_creds)
+            ]
+
+            for finished in asyncio.as_completed(batch_tasks):
+                i, result = await finished
+                batch_results[i] = result
+                if status_callback:
+                    if isinstance(result, Exception):
+                        status_callback(
+                            f"Session {batch_start + i + 1}/{total} failed initial "
+                            f"{'login' if login else 'create'}; retrying..."
+                        )
+                    else:
+                        completed += 1
+                        if progress_callback:
+                            progress_callback(completed, total)
+                        verb = "Logged in" if login else "Created"
+                        status_callback(
+                            f"{verb.lower()} {completed}/{total} sessions "
+                            f"(batch {batch_num}/{total_batches})"
+                        )
+                elif not isinstance(result, Exception):
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(completed, total)
             
             # Retry failures individually
-            for i, result in enumerate(batch_clients):
+            for i, result in enumerate(batch_results):
                 if isinstance(result, Exception):
                     try:
+                        if status_callback:
+                            status_callback(
+                                f"Retrying session {batch_start + i + 1}/{total} after login failure"
+                            )
                         client = await create_context()
                         if login:
                             await asyncio.sleep(1)
+                            if status_callback:
+                                status_callback(
+                                    f"Session {batch_start + i + 1}/{total}: retry login start"
+                                )
                             await client.login(
                                 batch_creds[i]["email"],
                                 batch_creds[i]["password"],
                                 max_retries=5,
+                                status_callback=(
+                                    (lambda msg, session_idx=batch_start + i + 1:
+                                        status_callback(f"Session {session_idx}/{total}: {msg}"))
+                                    if status_callback else None
+                                ),
                             )
                         self._clients.append(client)
+                        completed += 1
+                        if progress_callback:
+                            progress_callback(completed, total)
+                        if status_callback:
+                            status_callback(
+                                f"Retry succeeded for session {batch_start + i + 1}/{total} "
+                                f"({completed}/{total} ready)"
+                            )
                     except Exception as e:
                         raise RuntimeError(f"Failed to create/login client {batch_start + i}: {e}")
                 else:
                     self._clients.append(result)
-            
-            completed += len(batch_creds)
-            if progress_callback:
-                progress_callback(completed, total)
-            
+
             if batch_end < total:
                 await asyncio.sleep(0.3)
         
