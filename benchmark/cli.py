@@ -260,6 +260,9 @@ async def run_chat_ui_benchmark(
     first_token_timeout: Optional[int] = None,
     completion_timeout: Optional[int] = None,
     capture_ui_success_artifacts: bool = False,
+    capture_network_trace_on_error: bool = False,
+    capture_network_trace_on_success: bool = False,
+    network_trace_max_entries: Optional[int] = None,
     auto_scale: bool = False,
     response_threshold: int = 1000,
     step_size: Optional[int] = None,
@@ -301,6 +304,10 @@ async def run_chat_ui_benchmark(
     if completion_timeout:
         config.browser.completion_timeout_ms = completion_timeout
     config.browser.capture_success_artifacts = capture_ui_success_artifacts
+    config.browser.capture_network_trace_on_error = capture_network_trace_on_error
+    config.browser.capture_network_trace_on_success = capture_network_trace_on_success
+    if network_trace_max_entries:
+        config.browser.network_trace_max_entries = network_trace_max_entries
     
     # Create runner
     runner = BenchmarkRunner(
@@ -480,6 +487,21 @@ def main():
         action="store_true",
         help="Save screenshot + HTML for each successful chat-ui request (debugging)",
     )
+    run_parser.add_argument(
+        "--capture-network-trace-on-error",
+        action="store_true",
+        help="Save browser request/response trace JSON for failed chat-ui requests",
+    )
+    run_parser.add_argument(
+        "--capture-network-trace-on-success",
+        action="store_true",
+        help="Save browser request/response trace JSON for successful chat-ui requests",
+    )
+    run_parser.add_argument(
+        "--network-trace-max-entries",
+        type=int,
+        help="Max recorded browser network events kept per session (ring buffer)",
+    )
     
     # Auto-scaling options for chat-ui (auto-scale is default unless --max-users is specified)
     run_parser.add_argument(
@@ -553,6 +575,9 @@ def main():
                     first_token_timeout=getattr(args, 'first_token_timeout', None),
                     completion_timeout=getattr(args, 'completion_timeout', None),
                     capture_ui_success_artifacts=getattr(args, 'capture_ui_success_artifacts', False),
+                    capture_network_trace_on_error=getattr(args, 'capture_network_trace_on_error', False),
+                    capture_network_trace_on_success=getattr(args, 'capture_network_trace_on_success', False),
+                    network_trace_max_entries=getattr(args, 'network_trace_max_entries', None),
                     auto_scale=auto_scale,
                     response_threshold=getattr(args, 'response_threshold', 1000),
                     step_size=args.step_size,

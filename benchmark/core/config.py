@@ -120,6 +120,9 @@ class BrowserBenchmarkConfig(BaseModel):
     completion_timeout_ms: Optional[float] = None  # If set, overrides post-first-token wait
     screenshot_on_error: bool = True  # Take screenshot when errors occur
     capture_success_artifacts: bool = False  # Save screenshot + HTML for successful UI requests
+    capture_network_trace_on_error: bool = False  # Save request/response trace JSON on UI request failures
+    capture_network_trace_on_success: bool = False  # Save request/response trace JSON on successful UI requests
+    network_trace_max_entries: int = 5000  # Ring buffer size per browser session
     use_isolated_browsers: bool = False  # Use separate browser instances vs contexts
 
 

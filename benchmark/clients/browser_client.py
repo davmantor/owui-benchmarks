@@ -3,10 +3,11 @@ Browser client for UI-based benchmarking using Playwright.
 """
 
 import asyncio
+import json
 import time
 import re
-from typing import Optional, List, Dict, Any, Callable
-from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Callable, Set
+from dataclasses import dataclass
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
@@ -82,6 +83,8 @@ class BrowserClient:
         viewport_width: int = 1280,
         viewport_height: int = 720,
         timeout: float = 30000,
+        capture_network_trace: bool = False,
+        network_trace_max_entries: int = 5000,
     ):
         self.base_url = base_url.rstrip('/')
         self.headless = headless
@@ -89,12 +92,17 @@ class BrowserClient:
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
         self.timeout = timeout
+        self.capture_network_trace = capture_network_trace
+        self.network_trace_max_entries = max(100, network_trace_max_entries)
         
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._is_logged_in: bool = False
+        self._network_events: List[Dict[str, Any]] = []
+        self._network_trace_attached: bool = False
+        self._pending_network_trace_tasks: Set[asyncio.Task] = set()
     
     async def launch(self) -> None:
         """Launch the browser and create a new context."""
@@ -107,7 +115,7 @@ class BrowserClient:
             viewport={"width": self.viewport_width, "height": self.viewport_height},
         )
         self._page = await self._context.new_page()
-        self._page.set_default_timeout(self.timeout)
+        self._initialize_page()
     
     async def close(self) -> None:
         """Close the browser and clean up resources."""
@@ -122,6 +130,9 @@ class BrowserClient:
             self._playwright = None
         self._page = None
         self._is_logged_in = False
+        self._network_events = []
+        self._network_trace_attached = False
+        self._pending_network_trace_tasks.clear()
     
     @property
     def page(self) -> Page:
@@ -621,6 +632,174 @@ class BrowserClient:
         """Take a screenshot of the current page."""
         await self.page.screenshot(path=path)
 
+    def _initialize_page(self) -> None:
+        """Apply page defaults and optional diagnostics hooks."""
+        if self._page is None:
+            return
+        self._page.set_default_timeout(self.timeout)
+        self._attach_network_trace_handlers()
+
+    def _attach_network_trace_handlers(self) -> None:
+        """Capture request/response/failure events for later debugging artifacts."""
+        if not self.capture_network_trace or self._page is None or self._network_trace_attached:
+            return
+
+        def append_event(event: Dict[str, Any]) -> None:
+            self._network_events.append(event)
+            if len(self._network_events) > self.network_trace_max_entries:
+                overflow = len(self._network_events) - self.network_trace_max_entries
+                del self._network_events[:overflow]
+
+        def on_request(request: Any) -> None:
+            event = {
+                "ts": time.time(),
+                "event": "request",
+                "method": getattr(request, "method", None),
+                "url": getattr(request, "url", None),
+                "resource_type": getattr(request, "resource_type", None),
+            }
+            try:
+                if self._should_capture_network_body(
+                    event.get("url"),
+                    event.get("resource_type"),
+                ):
+                    post_data = getattr(request, "post_data", None)
+                    if post_data:
+                        event["post_data_snippet"] = str(post_data)[:2000]
+            except Exception:
+                pass
+            append_event(event)
+
+        def on_response(response: Any) -> None:
+            request = getattr(response, "request", None)
+            event = {
+                "ts": time.time(),
+                "event": "response",
+                "status": getattr(response, "status", None),
+                "ok": getattr(response, "ok", None),
+                "url": getattr(response, "url", None),
+                "method": getattr(request, "method", None) if request else None,
+                "resource_type": getattr(request, "resource_type", None) if request else None,
+            }
+            append_event(event)
+            try:
+                if self._should_capture_network_body(
+                    event.get("url"),
+                    event.get("resource_type"),
+                ):
+                    task = asyncio.create_task(self._capture_response_details(response))
+                    self._pending_network_trace_tasks.add(task)
+                    task.add_done_callback(lambda t: self._pending_network_trace_tasks.discard(t))
+            except Exception:
+                pass
+
+        def on_request_failed(request: Any) -> None:
+            failure_value = None
+            try:
+                failure_attr = getattr(request, "failure", None)
+                failure_value = failure_attr() if callable(failure_attr) else failure_attr
+            except Exception:
+                failure_value = None
+            append_event({
+                "ts": time.time(),
+                "event": "request_failed",
+                "method": getattr(request, "method", None),
+                "url": getattr(request, "url", None),
+                "resource_type": getattr(request, "resource_type", None),
+                "failure": failure_value,
+            })
+
+        self._page.on("request", on_request)
+        self._page.on("response", on_response)
+        self._page.on("requestfailed", on_request_failed)
+        self._network_trace_attached = True
+
+    def get_network_trace_cursor(self) -> int:
+        """Return the current end index for incremental trace capture."""
+        return len(self._network_events)
+
+    def get_network_trace_events(self, start_index: int = 0) -> List[Dict[str, Any]]:
+        """Return a copy of recorded network events from a starting cursor."""
+        if start_index < 0:
+            start_index = 0
+        return [dict(evt) for evt in self._network_events[start_index:]]
+
+    def save_network_trace(self, path: str, start_index: int = 0) -> int:
+        """Write recorded network events to JSON for debugging. Returns count written."""
+        events = self.get_network_trace_events(start_index=start_index)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(events, f, indent=2)
+        return len(events)
+
+    async def flush_network_trace(self, timeout_ms: int = 2000) -> None:
+        """Wait briefly for pending async response detail captures to finish."""
+        if not self._pending_network_trace_tasks:
+            return
+        pending = list(self._pending_network_trace_tasks)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=timeout_ms / 1000,
+            )
+        except Exception:
+            # Best-effort diagnostics; don't fail benchmark flow on trace capture timing.
+            pass
+
+    def _should_capture_network_body(
+        self,
+        url: Optional[str],
+        resource_type: Optional[str],
+    ) -> bool:
+        """Limit expensive body/header capture to likely API fetches."""
+        if resource_type not in {"fetch", "xhr"}:
+            return False
+        if not url:
+            return False
+        return "/api/" in url
+
+    async def _capture_response_details(self, response: Any) -> None:
+        """Capture headers and a bounded text snippet for API responses."""
+        try:
+            headers = {}
+            try:
+                headers = await response.all_headers()
+            except Exception:
+                headers = {}
+
+            content_type = (
+                headers.get("content-type")
+                or headers.get("Content-Type")
+                or ""
+            )
+
+            body_snippet = None
+            body_capture_error = None
+            lower_ct = content_type.lower()
+            if any(token in lower_ct for token in ("json", "text/", "event-stream")) or not lower_ct:
+                try:
+                    body_text = await response.text()
+                    body_snippet = (body_text or "")[:4000]
+                except Exception as e:
+                    body_capture_error = str(e)
+
+            self._network_events.append({
+                "ts": time.time(),
+                "event": "response_details",
+                "status": getattr(response, "status", None),
+                "url": getattr(response, "url", None),
+                "content_type": content_type,
+                "headers": headers,
+                "body_preview_200": (body_snippet[:200] if body_snippet else None),
+                "body_snippet": body_snippet,
+                "body_truncated": bool(body_snippet and len(body_snippet) >= 4000),
+                "body_capture_error": body_capture_error,
+            })
+            if len(self._network_events) > self.network_trace_max_entries:
+                overflow = len(self._network_events) - self.network_trace_max_entries
+                del self._network_events[:overflow]
+        except Exception:
+            pass
+
 
 class BrowserPool:
     """
@@ -639,6 +818,8 @@ class BrowserPool:
         viewport_height: int = 720,
         timeout: float = 30000,
         use_isolated_browsers: bool = False,
+        capture_network_trace: bool = False,
+        network_trace_max_entries: int = 5000,
     ):
         self.base_url = base_url
         self.headless = headless
@@ -647,6 +828,8 @@ class BrowserPool:
         self.viewport_height = viewport_height
         self.timeout = timeout
         self.use_isolated_browsers = use_isolated_browsers
+        self.capture_network_trace = capture_network_trace
+        self.network_trace_max_entries = max(100, network_trace_max_entries)
         
         self._playwright: Optional[Playwright] = None
         self._shared_browser: Optional[Browser] = None
@@ -685,6 +868,8 @@ class BrowserPool:
                     viewport_width=self.viewport_width,
                     viewport_height=self.viewport_height,
                     timeout=self.timeout,
+                    capture_network_trace=self.capture_network_trace,
+                    network_trace_max_entries=self.network_trace_max_entries,
                 )
                 await client.launch()
             else:
@@ -695,6 +880,8 @@ class BrowserPool:
                     viewport_width=self.viewport_width,
                     viewport_height=self.viewport_height,
                     timeout=self.timeout,
+                    capture_network_trace=self.capture_network_trace,
+                    network_trace_max_entries=self.network_trace_max_entries,
                 )
                 client._playwright = self._playwright
                 client._browser = self._shared_browser
@@ -702,7 +889,7 @@ class BrowserPool:
                     viewport={"width": self.viewport_width, "height": self.viewport_height},
                 )
                 client._page = await client._context.new_page()
-                client._page.set_default_timeout(self.timeout)
+                client._initialize_page()
             return client
         
         async def create_and_login(cred: Dict[str, str]) -> BrowserClient:

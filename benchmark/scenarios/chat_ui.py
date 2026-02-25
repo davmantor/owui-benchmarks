@@ -179,6 +179,11 @@ class ChatUIBenchmark(BaseBenchmark):
             viewport_width=browser_config.viewport_width,
             viewport_height=browser_config.viewport_height,
             timeout=browser_config.browser_timeout,
+            capture_network_trace=(
+                browser_config.capture_network_trace_on_error
+                or browser_config.capture_network_trace_on_success
+            ),
+            network_trace_max_entries=browser_config.network_trace_max_entries,
             use_isolated_browsers=browser_config.use_isolated_browsers,
         )
         
@@ -436,6 +441,7 @@ class ChatUIBenchmark(BaseBenchmark):
             reason: str,
             status: str,
             force_capture: bool = False,
+            network_trace_start: Optional[int] = None,
         ):
             """Print debug info and optionally capture screenshot/HTML for a request."""
             try:
@@ -450,30 +456,53 @@ class ChatUIBenchmark(BaseBenchmark):
                 f"url={current_url} reason={reason}"
             )
 
-            if not (force_capture or self.config.browser.screenshot_on_error):
-                return
-
             try:
                 debug_dir = Path(self.config.output.results_dir) / "chat_ui_debug"
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
                 base = f"u{user_num}_r{req_num}_{status}_{ts}"
+                should_capture_page = force_capture or self.config.browser.screenshot_on_error
+                if should_capture_page:
+                    screenshot_path = debug_dir / f"{base}.png"
+                    await client.take_screenshot(str(screenshot_path))
+                    console.print(f"[dim]Saved screenshot: {screenshot_path}[/dim]")
 
-                screenshot_path = debug_dir / f"{base}.png"
-                await client.take_screenshot(str(screenshot_path))
-                console.print(f"[dim]Saved screenshot: {screenshot_path}[/dim]")
+                    try:
+                        html = await client.page.content()
+                        html_path = debug_dir / f"{base}.html"
+                        html_path.write_text(html, encoding="utf-8")
+                        console.print(f"[dim]Saved page HTML: {html_path}[/dim]")
+                    except Exception as html_err:
+                        console.print(f"[yellow]Debug HTML capture failed: {html_err}[/yellow]")
 
                 try:
-                    html = await client.page.content()
-                    html_path = debug_dir / f"{base}.html"
-                    html_path.write_text(html, encoding="utf-8")
-                    console.print(f"[dim]Saved page HTML: {html_path}[/dim]")
-                except Exception as html_err:
-                    console.print(f"[yellow]Debug HTML capture failed: {html_err}[/yellow]")
+                    should_capture_network = (
+                        self.config.browser.capture_network_trace_on_success
+                        if status == "success"
+                        else self.config.browser.capture_network_trace_on_error
+                    )
+                    if should_capture_network:
+                        await client.flush_network_trace()
+                        network_path = debug_dir / f"{base}.network.json"
+                        event_count = client.save_network_trace(
+                            str(network_path),
+                            start_index=network_trace_start or 0,
+                        )
+                        console.print(
+                            f"[dim]Saved network trace ({event_count} events): {network_path}[/dim]"
+                        )
+                except Exception as net_err:
+                    console.print(f"[yellow]Network trace capture failed: {net_err}[/yellow]")
             except Exception as debug_err:
                 console.print(f"[yellow]Debug artifact capture failed: {debug_err}[/yellow]")
 
-        async def capture_failure_debug(client: BrowserClient, user_num: int, req_num: int, error_msg: str):
+        async def capture_failure_debug(
+            client: BrowserClient,
+            user_num: int,
+            req_num: int,
+            error_msg: str,
+            network_trace_start: Optional[int] = None,
+        ):
             """Capture artifacts for failed UI requests (if enabled)."""
             await capture_debug_artifacts(
                 client=client,
@@ -482,6 +511,7 @@ class ChatUIBenchmark(BaseBenchmark):
                 reason=error_msg,
                 status="failed",
                 force_capture=False,
+                network_trace_start=network_trace_start,
             )
         
         async def run_user_session(client: BrowserClient, user_num: int):
@@ -494,6 +524,7 @@ class ChatUIBenchmark(BaseBenchmark):
                 user_prompt = random.choice(chat_config.prompt_pool)
                 
                 try:
+                    network_trace_start = client.get_network_trace_cursor()
                     console.print(
                         f"[dim]User {user_num + 1}: request {req_num + 1}/{requests_per_user} starting[/dim]"
                     )
@@ -525,6 +556,7 @@ class ChatUIBenchmark(BaseBenchmark):
                                 reason="success",
                                 status="success",
                                 force_capture=True,
+                                network_trace_start=network_trace_start,
                             )
                         metrics.record_streaming_timing(
                             operation="chat_completion_ui",
@@ -541,7 +573,13 @@ class ChatUIBenchmark(BaseBenchmark):
                             f"({result.total_duration_ms:.0f}ms, ttft={result.ttft_ms:.0f}ms)[/dim]"
                         )
                     else:
-                        await capture_failure_debug(client, user_num, req_num, result.error or "Unknown error")
+                        await capture_failure_debug(
+                            client,
+                            user_num,
+                            req_num,
+                            result.error or "Unknown error",
+                            network_trace_start=network_trace_start,
+                        )
                         metrics.record_streaming_timing(
                             operation="chat_completion_ui",
                             duration_ms=result.total_duration_ms,
@@ -557,7 +595,13 @@ class ChatUIBenchmark(BaseBenchmark):
                     update_status()
                     
                 except Exception as e:
-                    await capture_failure_debug(client, user_num, req_num, str(e))
+                    await capture_failure_debug(
+                        client,
+                        user_num,
+                        req_num,
+                        str(e),
+                        network_trace_start=locals().get("network_trace_start"),
+                    )
                     metrics.record_streaming_timing(
                         operation="chat_completion_ui",
                         duration_ms=0,
