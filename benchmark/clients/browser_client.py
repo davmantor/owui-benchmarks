@@ -4,6 +4,7 @@ Browser client for UI-based benchmarking using Playwright.
 
 import asyncio
 import time
+import re
 from typing import Optional, List, Dict, Any, Callable
 from dataclasses import dataclass, field
 
@@ -14,6 +15,7 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 class BrowserChatResult:
     """Result from a browser-based chat interaction."""
     content: str
+    first_status_ms: float  # Time to first status emitter appearing in UI (0 if none)
     ttft_ms: float  # Time to first token appearing in UI
     total_duration_ms: float  # Time until streaming complete
     tokens_rendered: int  # Approximate tokens based on content length
@@ -46,8 +48,31 @@ class BrowserClient:
         "response_prose": '.prose',
         "response_content_container": '#response-content-container',
         "assistant_message": '.chat-assistant',
+        "status_emitter": '.status-description',
         "streaming_indicator": '.typing-indicator, [class*="loading"], [class*="streaming"]',
+        "error_toast": '[data-sonner-toast][data-type="error"]',
+        "error_toast_title": '[data-sonner-toast][data-type="error"] [data-title]',
     }
+
+    # Common provider/model error text patterns surfaced in the assistant pane.
+    # Keep these conservative to avoid false positives on normal content.
+    ERROR_TEXT_PATTERNS = [
+        r"^error\s*[:\-]",
+        r"^something went wrong\b",
+        r"^request failed\b",
+        r"^failed to (generate|get|fetch|complete)\b",
+        r"\brate limit(?:ed| exceeded)?\b",
+        r"\btoo many requests\b",
+        r"\binsufficient[_ ]quota\b",
+        r"\binvalid api key\b",
+        r"\bmodel .* not found\b",
+        r"\bprovider .* error\b",
+        r"\bconnection (?:error|failed|refused|timed out)\b",
+        r"\b502 bad gateway\b",
+        r"\b503 service unavailable\b",
+        r"\b504 gateway timeout\b",
+        r"\bcontext length exceeded\b",
+    ]
     
     def __init__(
         self,
@@ -248,6 +273,7 @@ class BrowserClient:
         """Send a message and wait for streaming response. Returns timing metrics."""
         start_time = time.time()
         first_token_time: Optional[float] = None
+        first_status_time: Optional[float] = None
         poll_interval_s = 0.1
         max_stable_checks = 10  # ~1s of stable content before considering response complete
         first_token_timeout_ms = first_token_timeout_ms or timeout_ms
@@ -263,6 +289,7 @@ class BrowserClient:
             if not chat_input:
                 return BrowserChatResult(
                     content="",
+                    first_status_ms=0,
                     ttft_ms=0,
                     total_duration_ms=0,
                     tokens_rendered=0,
@@ -327,6 +354,15 @@ class BrowserClient:
 
                 if response_message is not None:
                     saw_assistant_message = True
+                    if first_status_time is None:
+                        try:
+                            status_node = await response_message.query_selector(self.SELECTORS["status_emitter"])
+                            if status_node:
+                                status_text = (await status_node.inner_text() or "").strip()
+                                if status_text:
+                                    first_status_time = time.time()
+                        except Exception:
+                            pass
                     
                     # Re-resolve the response content element each poll because Open WebUI
                     # may replace/re-render the assistant subtree during streaming.
@@ -416,6 +452,7 @@ class BrowserClient:
             end_time = time.time()
             
             total_duration_ms = (end_time - send_time) * 1000
+            first_status_ms = (first_status_time - send_time) * 1000 if first_status_time else 0
             ttft_ms = (first_token_time - send_time) * 1000 if first_token_time else total_duration_ms
             tokens_rendered = len(content) // 4 if content else 0  # ~4 chars per token
 
@@ -427,6 +464,7 @@ class BrowserClient:
                         timeout_reason += " (assistant was still streaming/thinking)"
                     return BrowserChatResult(
                         content=content,
+                        first_status_ms=first_status_ms,
                         ttft_ms=ttft_ms,
                         total_duration_ms=total_duration_ms,
                         tokens_rendered=0,
@@ -435,6 +473,7 @@ class BrowserClient:
                     )
                 return BrowserChatResult(
                     content=content,
+                    first_status_ms=first_status_ms,
                     ttft_ms=ttft_ms,
                     total_duration_ms=total_duration_ms,
                     tokens_rendered=0,
@@ -451,15 +490,44 @@ class BrowserClient:
                     timeout_reason = "Timed out waiting for response completion after first token"
                 return BrowserChatResult(
                     content=content,
+                    first_status_ms=first_status_ms,
                     ttft_ms=ttft_ms,
                     total_duration_ms=total_duration_ms,
                     tokens_rendered=tokens_rendered,
                     success=False,
                     error=timeout_reason,
                 )
+
+            ui_error = await self._detect_ui_error_state(
+                response_message=response_message if 'response_message' in locals() else None,
+                assistant_content=content_stripped,
+            )
+            if ui_error:
+                return BrowserChatResult(
+                    content=content,
+                    first_status_ms=first_status_ms,
+                    ttft_ms=ttft_ms,
+                    total_duration_ms=total_duration_ms,
+                    tokens_rendered=tokens_rendered,
+                    success=False,
+                    error=ui_error,
+                )
+
+            detected_error = self._detect_assistant_error_text(content_stripped)
+            if detected_error:
+                return BrowserChatResult(
+                    content=content,
+                    first_status_ms=first_status_ms,
+                    ttft_ms=ttft_ms,
+                    total_duration_ms=total_duration_ms,
+                    tokens_rendered=tokens_rendered,
+                    success=False,
+                    error=detected_error,
+                )
             
             return BrowserChatResult(
                 content=content,
+                first_status_ms=first_status_ms,
                 ttft_ms=ttft_ms,
                 total_duration_ms=total_duration_ms,
                 tokens_rendered=tokens_rendered,
@@ -470,12 +538,84 @@ class BrowserClient:
             end_time = time.time()
             return BrowserChatResult(
                 content="",
+                first_status_ms=0,
                 ttft_ms=0,
                 total_duration_ms=(end_time - start_time) * 1000,
                 tokens_rendered=0,
                 success=False,
                 error=str(e),
             )
+
+    def _detect_assistant_error_text(self, content: str) -> Optional[str]:
+        """Return an error classification if the assistant content looks like a UI-rendered error."""
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        # Normalize whitespace for simpler matching.
+        normalized = re.sub(r"\s+", " ", text).strip()
+        lowered = normalized.lower()
+
+        # Strong exact/near-exact phrases commonly shown by UIs/providers.
+        exactish = {
+            "something went wrong",
+            "request failed",
+            "internal server error",
+            "service unavailable",
+            "gateway timeout",
+            "bad gateway",
+        }
+        if lowered in exactish:
+            return f"Assistant returned error message: {normalized[:200]}"
+
+        # Heuristic scope guard: error messages are usually fairly short.
+        # Allow longer matches only for very strong leading patterns.
+        for pattern in self.ERROR_TEXT_PATTERNS:
+            if re.search(pattern, lowered):
+                if len(normalized) <= 600 or re.match(r"^(error|something went wrong|request failed)", lowered):
+                    return f"Assistant returned error message: {normalized[:200]}"
+
+        return None
+
+    async def _detect_ui_error_state(self, response_message: Optional[Any], assistant_content: str) -> Optional[str]:
+        """Detect UI-rendered errors that may still produce placeholder assistant content like '{}'."""
+        # 1) Global error toast (Open WebUI uses sonner toasts)
+        try:
+            toast_title = await self.page.query_selector(self.SELECTORS["error_toast_title"])
+            if toast_title:
+                text = (await toast_title.inner_text() or "").strip()
+                if text:
+                    return f"UI error toast: {text[:200]}"
+        except Exception:
+            pass
+
+        # 2) Inline assistant error panel (red alert-style block in response container)
+        if response_message is not None:
+            try:
+                inline_error = await response_message.query_selector(
+                    '[id="response-content-container"] [class*="border-red"], '
+                    '[id="response-content-container"] [class*="bg-red"]'
+                )
+                if inline_error:
+                    panel_text = (await inline_error.inner_text() or "").strip()
+                    panel_text = re.sub(r"\s+", " ", panel_text).strip()
+                    # Open WebUI sometimes renders "{}" inside a red error panel.
+                    if panel_text in {"{}", ""}:
+                        return "Inline assistant error panel (empty/JSON placeholder)"
+                    return f"Inline assistant error panel: {panel_text[:200]}"
+            except Exception:
+                pass
+
+        # 3) Fallback: placeholder JSON-ish content is suspicious even without text patterns.
+        if assistant_content.strip() in {"{}", "[]", "null"}:
+            try:
+                toast = await self.page.query_selector(self.SELECTORS["error_toast"])
+                if toast and await toast.is_visible():
+                    return f"UI error toast with placeholder assistant content: {assistant_content[:50]}"
+            except Exception:
+                pass
+
+        return None
     
     async def take_screenshot(self, path: str) -> None:
         """Take a screenshot of the current page."""

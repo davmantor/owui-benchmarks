@@ -6,6 +6,7 @@ Provides common functionality for benchmark setup, execution, and teardown.
 
 import asyncio
 import time
+from collections import Counter
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Callable
@@ -252,6 +253,9 @@ class BaseBenchmark(ABC):
         combined.p50_ttft_ms = sum(r.p50_ttft_ms for r in results) / len(results)
         combined.p95_ttft_ms = sum(r.p95_ttft_ms for r in results) / len(results)
         combined.p99_ttft_ms = sum(r.p99_ttft_ms for r in results) / len(results)
+        combined.avg_first_status_ms = sum(r.avg_first_status_ms for r in results) / len(results)
+        combined.p95_first_status_ms = sum(r.p95_first_status_ms for r in results) / len(results)
+        combined.p99_first_status_ms = sum(r.p99_first_status_ms for r in results) / len(results)
         
         # Recalculate derived metrics
         if combined.total_requests > 0:
@@ -261,6 +265,10 @@ class BaseBenchmark(ABC):
             combined.requests_per_second = combined.total_requests / combined.total_duration_seconds
         
         combined.iterations = len(results)
+        combined.error_counts = dict(
+            sum((Counter(r.error_counts) for r in results), Counter())
+        )
+        combined.errors = sorted(combined.error_counts.keys())
         
         return combined
     

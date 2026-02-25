@@ -7,6 +7,7 @@ and generating benchmark reports.
 
 import statistics
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -27,6 +28,7 @@ class TimingRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     # Streaming-specific fields
+    time_to_first_status_ms: Optional[float] = None
     time_to_first_token_ms: Optional[float] = None
     tokens_generated: Optional[int] = None
     
@@ -74,6 +76,9 @@ class BenchmarkResult:
     p50_ttft_ms: float = 0.0
     p95_ttft_ms: float = 0.0
     p99_ttft_ms: float = 0.0
+    avg_first_status_ms: float = 0.0  # Average time to first status emitter
+    p95_first_status_ms: float = 0.0
+    p99_first_status_ms: float = 0.0
     avg_tokens_per_second: float = 0.0
     total_tokens_generated: int = 0
     
@@ -84,6 +89,7 @@ class BenchmarkResult:
     # Error information
     error_rate_percent: float = 0.0
     errors: List[str] = field(default_factory=list)
+    error_counts: Dict[str, int] = field(default_factory=dict)
     
     # Validation
     passed: bool = False
@@ -123,6 +129,9 @@ class BenchmarkResult:
             "p50_ttft_ms": round(self.p50_ttft_ms, 2),
             "p95_ttft_ms": round(self.p95_ttft_ms, 2),
             "p99_ttft_ms": round(self.p99_ttft_ms, 2),
+            "avg_first_status_ms": round(self.avg_first_status_ms, 2),
+            "p95_first_status_ms": round(self.p95_first_status_ms, 2),
+            "p99_first_status_ms": round(self.p99_first_status_ms, 2),
             "avg_tokens_per_second": round(self.avg_tokens_per_second, 2),
             "total_tokens_generated": self.total_tokens_generated,
             # Throughput
@@ -130,6 +139,8 @@ class BenchmarkResult:
             "total_duration_seconds": round(self.total_duration_seconds, 2),
             "error_rate_percent": round(self.error_rate_percent, 2),
             "errors": self.errors[:10],  # Limit to first 10 errors
+            "error_counts": self.error_counts,
+            "top_errors": self.format_top_errors(),
             "passed": self.passed,
             "iterations": self.iterations,
             "concurrent_users": self.concurrent_users,
@@ -143,6 +154,25 @@ class BenchmarkResult:
     def to_json(self) -> str:
         """Convert result to JSON string."""
         return json.dumps(self.to_dict(), indent=2)
+
+    def top_error_items(self, limit: int = 5) -> List[tuple[str, int]]:
+        """Return top error messages by frequency."""
+        if not self.error_counts:
+            return []
+        return sorted(
+            self.error_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:limit]
+
+    def format_top_errors(self, limit: int = 3, max_len: int = 120) -> str:
+        """Format top error counts for CSV/summary display."""
+        parts: List[str] = []
+        for message, count in self.top_error_items(limit=limit):
+            compact = " ".join(message.split())
+            if len(compact) > max_len:
+                compact = compact[: max_len - 3] + "..."
+            parts.append(f"{count}x {compact}")
+        return " | ".join(parts)
 
 
 class MetricsCollector:
@@ -243,6 +273,7 @@ class MetricsCollector:
         duration_ms: float,
         ttft_ms: float,
         tokens_generated: int,
+        first_status_ms: Optional[float] = None,
         success: bool = True,
         error: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -254,6 +285,7 @@ class MetricsCollector:
             operation: Name of the operation
             duration_ms: Total duration in milliseconds
             ttft_ms: Time to first token in milliseconds
+            first_status_ms: Time to first status emitter in milliseconds (optional)
             tokens_generated: Number of tokens in the response
             success: Whether the operation was successful
             error: Error message if failed
@@ -269,6 +301,7 @@ class MetricsCollector:
             success=success,
             error=error,
             metadata=metadata or {},
+            time_to_first_status_ms=first_status_ms,
             time_to_first_token_ms=ttft_ms,
             tokens_generated=tokens_generated,
         )
@@ -349,6 +382,16 @@ class MetricsCollector:
             result.p50_ttft_ms = self._percentile(sorted_ttft, 50)
             result.p95_ttft_ms = self._percentile(sorted_ttft, 95)
             result.p99_ttft_ms = self._percentile(sorted_ttft, 99)
+
+        first_status_values = [
+            t.time_to_first_status_ms for t in self._timings
+            if t.success and t.time_to_first_status_ms is not None and t.time_to_first_status_ms > 0
+        ]
+        if first_status_values:
+            result.avg_first_status_ms = statistics.mean(first_status_values)
+            sorted_status = sorted(first_status_values)
+            result.p95_first_status_ms = self._percentile(sorted_status, 95)
+            result.p99_first_status_ms = self._percentile(sorted_status, 99)
         
         # Calculate tokens per second and total tokens
         tps_values = [
@@ -382,10 +425,9 @@ class MetricsCollector:
             result.error_rate_percent = (result.failed_requests / result.total_requests) * 100
         
         # Collect unique errors
-        result.errors = list(set(
-            t.error for t in self._timings 
-            if t.error is not None
-        ))
+        error_messages = [t.error for t in self._timings if t.error is not None]
+        result.error_counts = dict(Counter(error_messages))
+        result.errors = sorted(result.error_counts.keys())
         
         # Calculate resource metrics
         if self._resource_samples:
@@ -483,7 +525,9 @@ class ResultsWriter:
             "avg_response_time_ms", "min_response_time_ms", "max_response_time_ms",
             "p50_response_time_ms", "p95_response_time_ms", "p99_response_time_ms",
             "avg_ttft_ms", "p50_ttft_ms", "p95_ttft_ms", "p99_ttft_ms",
+            "avg_first_status_ms", "p95_first_status_ms", "p99_first_status_ms",
             "requests_per_second", "error_rate_percent", "passed",
+            "top_errors",
             "peak_cpu_percent", "peak_memory_mb",
         ]
         
@@ -494,6 +538,7 @@ class ResultsWriter:
             for result in results:
                 row = result.to_dict()
                 row["timestamp"] = result.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                row["top_errors"] = result.format_top_errors(limit=3, max_len=160)
                 writer.writerow(row)
         
         return filepath
@@ -529,7 +574,11 @@ class ResultsWriter:
                 f"  Avg TTFT: {result.avg_ttft_ms:.2f}ms",
                 f"  P95 TTFT: {result.p95_ttft_ms:.2f}ms",
                 f"  P99 TTFT: {result.p99_ttft_ms:.2f}ms",
+                f"  Avg First Status: {result.avg_first_status_ms:.2f}ms",
+                f"  P95 First Status: {result.p95_first_status_ms:.2f}ms",
+                f"  P99 First Status: {result.p99_first_status_ms:.2f}ms",
                 f"  Requests/sec: {result.requests_per_second:.2f}",
+                f"  Top Errors: {result.format_top_errors(limit=3) or 'None'}",
                 f"  Status: {'PASSED' if result.passed else 'FAILED'}",
                 "",
             ])

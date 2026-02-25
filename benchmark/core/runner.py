@@ -156,12 +156,15 @@ class BenchmarkRunner:
         table.add_row("Total Requests", str(result.total_requests))
         table.add_row("Successful", str(result.successful_requests))
         table.add_row("Failed", str(result.failed_requests))
-        table.add_row("Avg Response Time", f"{result.avg_response_time_ms:.2f} ms")
-        table.add_row("P95 Response Time", f"{result.p95_response_time_ms:.2f} ms")
-        table.add_row("P99 Response Time", f"{result.p99_response_time_ms:.2f} ms")
+        table.add_row("Avg First Status", f"{result.avg_first_status_ms:.2f} ms")
+        table.add_row("P95 First Status", f"{result.p95_first_status_ms:.2f} ms")
+        table.add_row("P99 First Status", f"{result.p99_first_status_ms:.2f} ms")
         table.add_row("Avg TTFT", f"{result.avg_ttft_ms:.2f} ms")
         table.add_row("P95 TTFT", f"{result.p95_ttft_ms:.2f} ms")
         table.add_row("P99 TTFT", f"{result.p99_ttft_ms:.2f} ms")
+        table.add_row("Avg Response Time", f"{result.avg_response_time_ms:.2f} ms")
+        table.add_row("P95 Response Time", f"{result.p95_response_time_ms:.2f} ms")
+        table.add_row("P99 Response Time", f"{result.p99_response_time_ms:.2f} ms")
         table.add_row("Requests/sec", f"{result.requests_per_second:.2f}")
         
         # Color-code error rate
@@ -173,6 +176,18 @@ class BenchmarkRunner:
             table.add_row("Peak Memory", f"{result.peak_memory_mb:.1f} MB")
         
         console.print(table)
+
+        top_errors = result.top_error_items(limit=3)
+        if top_errors:
+            error_table = Table(title="Top Errors")
+            error_table.add_column("Count", justify="right", style="red")
+            error_table.add_column("Error", style="yellow")
+            for message, count in top_errors:
+                compact = " ".join(message.split())
+                if len(compact) > 140:
+                    compact = compact[:137] + "..."
+                error_table.add_row(str(count), compact)
+            console.print(error_table)
     
     def _write_results(self, results: List[BenchmarkResult]) -> None:
         """Write benchmark results to files."""
@@ -237,12 +252,12 @@ class BenchmarkRunner:
             error_color = "green" if result.error_rate_percent < 1 else "yellow" if result.error_rate_percent < 5 else "red"
             table.add_row(
                 result.benchmark_name,
-                "Response",
+                "Status",
                 str(result.concurrent_users),
                 str(result.total_requests),
-                f"{result.avg_response_time_ms:.0f}ms",
-                f"{result.p95_response_time_ms:.0f}ms",
-                f"{result.p99_response_time_ms:.0f}ms",
+                f"{result.avg_first_status_ms:.0f}ms",
+                f"{result.p95_first_status_ms:.0f}ms",
+                f"{result.p99_first_status_ms:.0f}ms",
                 f"{result.requests_per_second:.1f}",
                 f"[{error_color}]{result.error_rate_percent:.1f}%[/{error_color}]",
             )
@@ -256,6 +271,17 @@ class BenchmarkRunner:
                 f"{result.p99_ttft_ms:.0f}ms",
                 "",
                 "",
+            )
+            table.add_row(
+                "",
+                "Response",
+                str(result.concurrent_users),
+                str(result.total_requests),
+                f"{result.avg_response_time_ms:.0f}ms",
+                f"{result.p95_response_time_ms:.0f}ms",
+                f"{result.p99_response_time_ms:.0f}ms",
+                f"{result.requests_per_second:.1f}",
+                f"[{error_color}]{result.error_rate_percent:.1f}%[/{error_color}]",
             )
             table.add_section()
         

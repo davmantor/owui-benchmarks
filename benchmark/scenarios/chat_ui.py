@@ -429,27 +429,35 @@ class ChatUIBenchmark(BaseBenchmark):
             progress.update(task, completed=completed + errors,
                           description=f"Done: {completed} | Errors: {errors}")
 
-        async def capture_failure_debug(client: BrowserClient, user_num: int, req_num: int, error_msg: str):
-            """Print immediate debug info and optionally capture artifacts on UI failures."""
+        async def capture_debug_artifacts(
+            client: BrowserClient,
+            user_num: int,
+            req_num: int,
+            reason: str,
+            status: str,
+            force_capture: bool = False,
+        ):
+            """Print debug info and optionally capture screenshot/HTML for a request."""
             try:
                 current_url = client.page.url
             except Exception:
                 current_url = "<unavailable>"
 
+            style = "red" if status == "failed" else "cyan"
             console.print(
-                f"[red]UI request failed[/red] "
+                f"[{style}]UI request {status}[/{style}] "
                 f"(user={user_num}, request={req_num}) "
-                f"url={current_url} error={error_msg}"
+                f"url={current_url} reason={reason}"
             )
 
-            if not self.config.browser.screenshot_on_error:
+            if not (force_capture or self.config.browser.screenshot_on_error):
                 return
 
             try:
                 debug_dir = Path(self.config.output.results_dir) / "chat_ui_debug"
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-                base = f"u{user_num}_r{req_num}_{ts}"
+                base = f"u{user_num}_r{req_num}_{status}_{ts}"
 
                 screenshot_path = debug_dir / f"{base}.png"
                 await client.take_screenshot(str(screenshot_path))
@@ -464,6 +472,17 @@ class ChatUIBenchmark(BaseBenchmark):
                     console.print(f"[yellow]Debug HTML capture failed: {html_err}[/yellow]")
             except Exception as debug_err:
                 console.print(f"[yellow]Debug artifact capture failed: {debug_err}[/yellow]")
+
+        async def capture_failure_debug(client: BrowserClient, user_num: int, req_num: int, error_msg: str):
+            """Capture artifacts for failed UI requests (if enabled)."""
+            await capture_debug_artifacts(
+                client=client,
+                user_num=user_num,
+                req_num=req_num,
+                reason=error_msg,
+                status="failed",
+                force_capture=False,
+            )
         
         async def run_user_session(client: BrowserClient, user_num: int):
             nonlocal completed, errors
@@ -498,11 +517,21 @@ class ChatUIBenchmark(BaseBenchmark):
                     )
                     
                     if result.success:
+                        if self.config.browser.capture_success_artifacts:
+                            await capture_debug_artifacts(
+                                client=client,
+                                user_num=user_num,
+                                req_num=req_num,
+                                reason="success",
+                                status="success",
+                                force_capture=True,
+                            )
                         metrics.record_streaming_timing(
                             operation="chat_completion_ui",
                             duration_ms=result.total_duration_ms,
                             ttft_ms=result.ttft_ms,
                             tokens_generated=result.tokens_rendered,
+                            first_status_ms=result.first_status_ms,
                             success=True,
                             metadata={"user": user_num, "request": req_num},
                         )
@@ -518,6 +547,7 @@ class ChatUIBenchmark(BaseBenchmark):
                             duration_ms=result.total_duration_ms,
                             ttft_ms=0,
                             tokens_generated=0,
+                            first_status_ms=0,
                             success=False,
                             error=result.error,
                             metadata={"user": user_num, "request": req_num},
@@ -533,6 +563,7 @@ class ChatUIBenchmark(BaseBenchmark):
                         duration_ms=0,
                         ttft_ms=0,
                         tokens_generated=0,
+                        first_status_ms=0,
                         success=False,
                         error=str(e),
                         metadata={"user": user_num, "request": req_num},
