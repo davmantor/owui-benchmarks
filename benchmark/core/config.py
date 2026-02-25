@@ -96,16 +96,16 @@ class ChatBenchmarkConfig(BaseModel):
     # Pool of short prompts to maximize OpenAI prompt caching
     # These are designed to be similar enough for caching but varied enough to be realistic
     prompt_pool: List[str] = Field(default_factory=lambda: [
-        "What is 2+2?",
-        "What is the capital of France?",
-        "Name one primary color.",
-        "What is H2O?",
-        "How many days in a week?",
-        "What is the opposite of hot?",
-        "Name a mammal.",
-        "What color is the sky?",
-        "How many legs does a dog have?",
-        "What is the first letter of the alphabet?",
+        "What clubs are good for meeting new friends?",
+        "Are there any beginner-friendly coding groups?",
+        "What events are happening this week?",
+        "I’m into art and design — what should I check out?",
+        "Any low-commitment volunteer opportunities?",
+        "Clubs related to AI or machine learning?",
+        "How can I find study groups for my major?",
+        "What are some fun outdoor activities on campus?",
+        "I want to explore entrepreneurship — where do I start?",
+        "Are there communities for transfer students?"
     ])
 
 
