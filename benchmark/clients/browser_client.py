@@ -265,10 +265,22 @@ class BrowserClient:
                 count = await locator.count()
                 if count == 0:
                     return False
-                target = locator.first
-                await target.wait_for(state="visible", timeout=timeout_ms)
-                await target.click(timeout=timeout_ms)
-                return True
+                # Try all candidates because many Open WebUI pages include hidden
+                # sentinel buttons before the visible toolbar action.
+                for idx in range(count):
+                    target = locator.nth(idx)
+                    try:
+                        await target.wait_for(state="visible", timeout=timeout_ms)
+                        await target.click(timeout=timeout_ms)
+                        return True
+                    except Exception:
+                        try:
+                            # Last-resort click when overlays/animations race visibility.
+                            await target.click(timeout=timeout_ms, force=True)
+                            return True
+                        except Exception:
+                            continue
+                return False
             except Exception:
                 return False
 
@@ -301,10 +313,37 @@ class BrowserClient:
                 if await _click_locator(menu_new_chat_btn, timeout_ms=2000):
                     await self.page.wait_for_timeout(800)
                     return True
+                menu_new_chat_text = self.page.locator('[role="menuitem"]:has-text("New Chat")')
+                if await _click_locator(menu_new_chat_text, timeout_ms=2000):
+                    await self.page.wait_for_timeout(800)
+                    return True
         except Exception:
             pass
 
         return False
+
+    async def reset_chat_state(self) -> bool:
+        """Recover to a usable chat page after New Chat or response failures."""
+        try:
+            # Fast path: New Chat works in current page context.
+            if await self.start_new_chat():
+                return True
+
+            # Hard reset: return to chat root and wait for composer.
+            await self.page.goto(f"{self.base_url}/", wait_until="domcontentloaded", timeout=30000)
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=7000)
+            except Exception:
+                pass
+
+            await self.page.wait_for_selector(
+                self.SELECTORS["chat_input"],
+                state="visible",
+                timeout=10000,
+            )
+            return True
+        except Exception:
+            return False
     
     async def send_message_and_wait(
         self,

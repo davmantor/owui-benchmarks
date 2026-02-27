@@ -532,9 +532,15 @@ class ChatUIBenchmark(BaseBenchmark):
                     if req_num > 0:
                         started_new_chat = await client.start_new_chat()
                         if not started_new_chat:
-                            console.print(
-                                f"[yellow]User {user_num + 1}: could not click New Chat; continuing in current chat[/yellow]"
-                            )
+                            recovered = await client.reset_chat_state()
+                            if recovered:
+                                console.print(
+                                    f"[yellow]User {user_num + 1}: New Chat click failed; recovered via page reset[/yellow]"
+                                )
+                            else:
+                                console.print(
+                                    f"[yellow]User {user_num + 1}: could not click New Chat or recover; continuing in current chat[/yellow]"
+                                )
                         else:
                             console.print(
                                 f"[dim]User {user_num + 1}: opened new chat[/dim]"
@@ -591,6 +597,16 @@ class ChatUIBenchmark(BaseBenchmark):
                             metadata={"user": user_num, "request": req_num},
                         )
                         errors += 1
+                        if req_num < requests_per_user - 1:
+                            recovered = await client.reset_chat_state()
+                            if recovered:
+                                console.print(
+                                    f"[dim]User {user_num + 1}: recovered chat state after failed request[/dim]"
+                                )
+                            else:
+                                console.print(
+                                    f"[yellow]User {user_num + 1}: failed to recover chat state after failed request[/yellow]"
+                                )
                     
                     update_status()
                     
