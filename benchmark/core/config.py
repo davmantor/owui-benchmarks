@@ -77,9 +77,11 @@ class ChannelBenchmarkConfig(BaseModel):
 class ChatBenchmarkConfig(BaseModel):
     """AI Chat benchmark configuration."""
     model: str = "gpt-4o-mini"
+    channel: Optional[str] = None  # Channel name/slug/id used by channel-ui benchmark
     max_concurrent_users: int = 10
     requests_per_user: int = 5
     sustain_time: int = 60  # seconds
+    start_new_chat_between_requests: bool = True
     
     # Auto-scaling configuration
     auto_scale: bool = False  # Enable auto-scaling mode
@@ -124,6 +126,7 @@ class BrowserBenchmarkConfig(BaseModel):
     capture_network_trace_on_success: bool = False  # Save request/response trace JSON on successful UI requests
     network_trace_max_entries: int = 5000  # Ring buffer size per browser session
     use_isolated_browsers: bool = False  # Use separate browser instances vs contexts
+    pause_after_login: bool = False  # Debug mode: pause after browser sessions login
 
 
 class OutputConfig(BaseModel):
@@ -276,12 +279,15 @@ class ConfigLoader:
         chat_config = ChatBenchmarkConfig(**chat_data) if chat_data else ChatBenchmarkConfig()
         
         chat_model = os.environ.get("CHAT_BENCHMARK_MODEL")
+        chat_channel = os.environ.get("CHAT_BENCHMARK_CHANNEL")
         chat_max_users = os.environ.get("CHAT_MAX_CONCURRENT_USERS")
         chat_requests = os.environ.get("CHAT_REQUESTS_PER_USER")
         chat_sustain = os.environ.get("CHAT_SUSTAIN_TIME_SECONDS")
         
         if chat_model:
             chat_config.model = chat_model
+        if chat_channel:
+            chat_config.channel = chat_channel
         if chat_max_users:
             chat_config.max_concurrent_users = int(chat_max_users)
         if chat_requests:

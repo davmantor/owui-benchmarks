@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 import re
+from urllib.parse import quote
 from typing import Optional, List, Dict, Any, Callable, Set
 from dataclasses import dataclass
 
@@ -39,7 +40,7 @@ class BrowserClient:
         "email_input": 'input[type="email"]',
         "password_input": 'input[type="password"]',
         "login_button": 'button[type="submit"]',
-        "chat_input": '[contenteditable="true"]',
+        "chat_input": '[contenteditable="true"], #message-input-container textarea, textarea[placeholder*="message" i], textarea[placeholder*="reply" i], textarea[placeholder*="chat" i]',
         "send_button": 'button[type="submit"]:has(svg), button[aria-label*="Send"]',
         # Open WebUI variants often render this as an icon-only button with aria-label.
         "new_chat_button": 'button[aria-label*="New Chat" i], button:has-text("New Chat"), a[href="/"]',
@@ -257,6 +258,111 @@ class BrowserClient:
             return False
         except Exception:
             return False
+
+    async def navigate_to_channel(self, channel: str) -> bool:
+        """Navigate to a channel conversation by id/slug/name."""
+        channel = (channel or "").strip()
+        if not channel:
+            return False
+
+        escaped_name = re.escape(channel.lstrip("#"))
+        exact_name = re.compile(rf"^\s*#?\s*{escaped_name}\s*$", re.I)
+        partial_name = re.compile(escaped_name, re.I)
+
+        async def _click_channel_entry(timeout_ms: int = 2500) -> bool:
+            locators = [
+                self.page.get_by_role("link", name=exact_name),
+                self.page.get_by_role("button", name=exact_name),
+                self.page.locator('a[href*="/c/"]').filter(has_text=partial_name),
+                self.page.locator('a[href*="/channels/"]').filter(has_text=partial_name),
+                self.page.locator('[data-testid*="channel"]').filter(has_text=partial_name),
+                self.page.get_by_text(exact_name),
+                self.page.get_by_text(partial_name),
+            ]
+
+            for locator in locators:
+                try:
+                    count = await locator.count()
+                except Exception:
+                    count = 0
+                if count == 0:
+                    continue
+                for idx in range(count):
+                    candidate = locator.nth(idx)
+                    try:
+                        await candidate.wait_for(state="visible", timeout=timeout_ms)
+                        await candidate.click(timeout=timeout_ms)
+                        await self.page.wait_for_timeout(700)
+                        return True
+                    except Exception:
+                        continue
+            return False
+
+        async def _is_not_found_page() -> bool:
+            try:
+                body_text = (await self.page.inner_text("body") or "").lower()
+                return "404: not found" in body_text or "404 not found" in body_text
+            except Exception:
+                return False
+
+        direct_candidates = []
+        if re.match(r"^[A-Za-z0-9._-]+$", channel):
+            quoted = quote(channel, safe="")
+            direct_candidates.extend([
+                f"{self.base_url}/channels/{quoted}",
+            ])
+
+        browse_candidates = [
+            f"{self.base_url}/",
+            f"{self.base_url}/channels",
+        ]
+
+        for url in direct_candidates + browse_candidates:
+            try:
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+
+                if await _is_not_found_page():
+                    continue
+
+                if "/channels/" in self.page.url:
+                    try:
+                        await self._wait_for_chat_input(timeout_ms=15000)
+                        return True
+                    except Exception:
+                        # In some builds composer is virtualized; if not a 404 and
+                        # still on /channels/{id}, treat as successful navigation.
+                        if not await _is_not_found_page():
+                            return True
+
+                if await _click_channel_entry():
+                    if await _is_not_found_page():
+                        continue
+                    await self._wait_for_chat_input(timeout_ms=15000)
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    async def _wait_for_chat_input(self, timeout_ms: int = 10000) -> Any:
+        """Wait for a visible chat composer across Open WebUI variants."""
+        selectors = [s.strip() for s in self.SELECTORS["chat_input"].split(",") if s.strip()]
+        per_selector_timeout = max(800, int(timeout_ms / max(1, len(selectors))))
+
+        last_error: Optional[Exception] = None
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=per_selector_timeout)
+                return locator
+            except Exception as e:
+                last_error = e
+
+        raise RuntimeError(f"Chat input not found: {last_error}")
     
     async def start_new_chat(self) -> bool:
         """Start a new chat session."""
@@ -336,11 +442,7 @@ class BrowserClient:
             except Exception:
                 pass
 
-            await self.page.wait_for_selector(
-                self.SELECTORS["chat_input"],
-                state="visible",
-                timeout=10000,
-            )
+            await self._wait_for_chat_input(timeout_ms=15000)
             return True
         except Exception:
             return False
@@ -362,11 +464,7 @@ class BrowserClient:
         completion_timeout_ms = completion_timeout_ms or timeout_ms
         
         try:
-            chat_input = await self.page.wait_for_selector(
-                self.SELECTORS["chat_input"],
-                state="visible",
-                timeout=10000,
-            )
+            chat_input = await self._wait_for_chat_input(timeout_ms=15000)
             
             if not chat_input:
                 return BrowserChatResult(
@@ -381,7 +479,10 @@ class BrowserClient:
             
             # contenteditable requires click + type instead of fill
             await chat_input.click()
-            await chat_input.press("Control+a")
+            try:
+                await chat_input.press("Control+a")
+            except Exception:
+                await chat_input.press("Meta+a")
             await self.page.keyboard.type(message)
             
             initial_messages = await self.page.query_selector_all(self.SELECTORS["message_container"])

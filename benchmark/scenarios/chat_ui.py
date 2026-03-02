@@ -60,6 +60,10 @@ class ChatUIBenchmark(BaseBenchmark):
         # Store original signal handlers
         self._original_sigint = None
         self._original_sigterm = None
+
+    async def _prepare_client_for_session(self, client: BrowserClient, user_num: int) -> None:
+        """Hook for derived benchmarks to prepare each browser client before requests."""
+        return None
     
     def _setup_signal_handlers(self):
         """Set up signal handlers for graceful cleanup on interrupt."""
@@ -228,6 +232,27 @@ class ChatUIBenchmark(BaseBenchmark):
     async def run(self) -> BenchmarkResult:
         """Execute the benchmark in either fixed or auto-scale mode."""
         chat_config = self.config.chat
+
+        if self.config.browser.pause_after_login:
+            console.print(
+                "[yellow]Paused after login for manual debugging. "
+                "Use Ctrl+C to end and trigger cleanup.[/yellow]"
+            )
+            while not self._interrupted:
+                await asyncio.sleep(0.5)
+
+            metrics = MetricsCollector()
+            metrics.start()
+            metrics.stop()
+            return metrics.get_result(
+                benchmark_name=self.name,
+                concurrent_users=len(self._browser_pool.clients) if self._browser_pool else 0,
+                metadata={
+                    "mode": "paused_after_login",
+                    "model": chat_config.model,
+                    "headless": self.config.browser.headless,
+                },
+            )
         
         if chat_config.auto_scale:
             return await self._run_auto_scale()
@@ -516,7 +541,35 @@ class ChatUIBenchmark(BaseBenchmark):
         
         async def run_user_session(client: BrowserClient, user_num: int):
             nonlocal completed, errors
-            
+
+            session_network_trace_start = client.get_network_trace_cursor()
+            try:
+                await self._prepare_client_for_session(client, user_num)
+            except Exception as e:
+                await capture_debug_artifacts(
+                    client=client,
+                    user_num=user_num,
+                    req_num=0,
+                    reason=f"Session setup failed: {e}",
+                    status="failed",
+                    force_capture=False,
+                    network_trace_start=session_network_trace_start,
+                )
+                for req_num in range(requests_per_user):
+                    metrics.record_streaming_timing(
+                        operation="chat_completion_ui",
+                        duration_ms=0,
+                        ttft_ms=0,
+                        tokens_generated=0,
+                        first_status_ms=0,
+                        success=False,
+                        error=f"Session setup failed: {e}",
+                        metadata={"user": user_num, "request": req_num},
+                    )
+                    errors += 1
+                    update_status()
+                return
+
             for req_num in range(requests_per_user):
                 if self._interrupted:
                     break
@@ -529,7 +582,10 @@ class ChatUIBenchmark(BaseBenchmark):
                         f"[dim]User {user_num + 1}: request {req_num + 1}/{requests_per_user} starting[/dim]"
                     )
 
-                    if req_num > 0:
+                    should_start_new_chat = (
+                        req_num > 0 and self.config.chat.start_new_chat_between_requests
+                    )
+                    if should_start_new_chat:
                         started_new_chat = await client.start_new_chat()
                         if not started_new_chat:
                             recovered = await client.reset_chat_state()

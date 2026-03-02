@@ -277,6 +277,7 @@ class OpenWebUIClient:
         name: str,
         description: Optional[str] = None,
         access_control: Optional[Dict] = None,
+        channel_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new channel (admin only).
@@ -285,6 +286,7 @@ class OpenWebUIClient:
             name: Channel name
             description: Optional channel description
             access_control: Optional access control settings
+            channel_type: Optional channel type (e.g., "group")
             
         Returns:
             Created channel dictionary
@@ -296,6 +298,8 @@ class OpenWebUIClient:
             payload["description"] = description
         if access_control:
             payload["access_control"] = access_control
+        if channel_type:
+            payload["type"] = channel_type
         
         response = await self.client.post(
             "/api/v1/channels/create",

@@ -18,6 +18,7 @@ from benchmark.core.runner import BenchmarkRunner
 from benchmark.scenarios.channels import ChannelAPIBenchmark, ChannelWebSocketBenchmark
 from benchmark.scenarios.chat import ChatAPIBenchmark
 from benchmark.scenarios.chat_ui import ChatUIBenchmark
+from benchmark.scenarios.channel_ui import ChannelUIBenchmark
 from benchmark.auth import (
     ensure_admin_authenticated,
     AuthenticationError,
@@ -134,6 +135,7 @@ def list_benchmarks():
         ("channels-ws", ChannelWebSocketBenchmark),
         ("chat-api", ChatAPIBenchmark),
         ("chat-ui", ChatUIBenchmark),
+        ("channel-ui", ChannelUIBenchmark),
     ]
     
     for cmd, benchmark_class in benchmarks:
@@ -263,6 +265,7 @@ async def run_chat_ui_benchmark(
     capture_network_trace_on_error: bool = False,
     capture_network_trace_on_success: bool = False,
     network_trace_max_entries: Optional[int] = None,
+    pause_after_login: bool = False,
     auto_scale: bool = False,
     response_threshold: int = 1000,
     step_size: Optional[int] = None,
@@ -306,6 +309,7 @@ async def run_chat_ui_benchmark(
     config.browser.capture_success_artifacts = capture_ui_success_artifacts
     config.browser.capture_network_trace_on_error = capture_network_trace_on_error
     config.browser.capture_network_trace_on_success = capture_network_trace_on_success
+    config.browser.pause_after_login = pause_after_login
     if network_trace_max_entries:
         config.browser.network_trace_max_entries = network_trace_max_entries
     
@@ -320,6 +324,90 @@ async def run_chat_ui_benchmark(
     result = await runner.run_benchmark(ChatUIBenchmark)
     runner.display_final_summary()
     
+    return result
+
+
+async def run_channel_ui_benchmark(
+    profile_id: str = "default",
+    target_url: Optional[str] = None,
+    max_users: Optional[int] = None,
+    model: Optional[str] = None,
+    channel: Optional[str] = None,
+    requests_per_user: Optional[int] = None,
+    headless: bool = True,
+    slow_mo: int = 0,
+    browser_timeout: Optional[int] = None,
+    first_token_timeout: Optional[int] = None,
+    completion_timeout: Optional[int] = None,
+    capture_ui_success_artifacts: bool = False,
+    capture_network_trace_on_error: bool = False,
+    capture_network_trace_on_success: bool = False,
+    network_trace_max_entries: Optional[int] = None,
+    pause_after_login: bool = False,
+    auto_scale: bool = False,
+    response_threshold: int = 1000,
+    step_size: Optional[int] = None,
+    output_dir: Optional[str] = None,
+):
+    """Run the channel UI concurrency benchmark using browser automation."""
+    overrides = {}
+    if target_url:
+        overrides["target_url"] = target_url
+
+    config = load_config(profile_id, overrides=overrides)
+
+    # Auto-scale mode settings
+    config.chat.auto_scale = auto_scale
+    config.chat.response_time_threshold_ms = response_threshold
+
+    if step_size:
+        config.chat.user_step_size = step_size
+
+    if auto_scale:
+        # In auto-scale mode, max_users becomes the cap (default 200)
+        config.chat.max_user_cap = max_users if max_users else 200
+    elif max_users:
+        config.chat.max_concurrent_users = max_users
+
+    if model:
+        config.chat.model = model
+
+    if requests_per_user:
+        config.chat.requests_per_user = requests_per_user
+
+    if channel:
+        config.chat.channel = channel
+
+    # Keep each user in the same channel thread for all requests.
+    config.chat.start_new_chat_between_requests = False
+
+    # Browser-specific settings
+    config.browser.headless = headless
+    config.browser.slow_mo = slow_mo
+    if browser_timeout:
+        config.browser.browser_timeout = browser_timeout
+    if first_token_timeout:
+        config.browser.first_token_timeout_ms = first_token_timeout
+    if completion_timeout:
+        config.browser.completion_timeout_ms = completion_timeout
+    config.browser.capture_success_artifacts = capture_ui_success_artifacts
+    config.browser.capture_network_trace_on_error = capture_network_trace_on_error
+    config.browser.capture_network_trace_on_success = capture_network_trace_on_success
+    config.browser.pause_after_login = pause_after_login
+    if network_trace_max_entries:
+        config.browser.network_trace_max_entries = network_trace_max_entries
+
+    # Create runner
+    runner = BenchmarkRunner(
+        config=config,
+        profile_id=profile_id,
+        output_dir=Path(output_dir) if output_dir else None,
+    )
+
+    # Run benchmark
+    result = await runner.run_benchmark(ChannelUIBenchmark)
+    runner.display_final_summary()
+
     return result
 
 
@@ -413,7 +501,7 @@ def main():
         "benchmark",
         nargs="?",
         default="chat-ui",
-        choices=["all", "channels-api", "channels-ws", "chat-api", "chat-ui"],
+        choices=["all", "channels-api", "channels-ws", "chat-api", "chat-ui", "channel-ui"],
         help="Benchmark to run (default: chat-ui)",
     )
     run_parser.add_argument(
@@ -443,6 +531,10 @@ def main():
         "--requests-per-user",
         type=int,
         help="Number of chat requests to send per user/session (chat benchmarks)",
+    )
+    run_parser.add_argument(
+        "--channel",
+        help="Target channel name/id/slug for channel-ui benchmark (default: benchmark-testing, auto-created if missing)",
     )
     run_parser.add_argument(
         "-o", "--output",
@@ -501,6 +593,11 @@ def main():
         "--network-trace-max-entries",
         type=int,
         help="Max recorded browser network events kept per session (ring buffer)",
+    )
+    run_parser.add_argument(
+        "--pause-after-login",
+        action="store_true",
+        help="UI benchmarks: pause after browser login so you can manually inspect before requests",
     )
     
     # Auto-scaling options for chat-ui (auto-scale is default unless --max-users is specified)
@@ -578,6 +675,32 @@ def main():
                     capture_network_trace_on_error=getattr(args, 'capture_network_trace_on_error', False),
                     capture_network_trace_on_success=getattr(args, 'capture_network_trace_on_success', False),
                     network_trace_max_entries=getattr(args, 'network_trace_max_entries', None),
+                    pause_after_login=getattr(args, 'pause_after_login', False),
+                    auto_scale=auto_scale,
+                    response_threshold=getattr(args, 'response_threshold', 1000),
+                    step_size=args.step_size,
+                    output_dir=args.output,
+                ))
+            elif args.benchmark == "channel-ui":
+                # Auto-scale by default, fixed mode if --max-users is specified
+                auto_scale = args.max_users is None
+                asyncio.run(run_channel_ui_benchmark(
+                    profile_id=args.profile,
+                    target_url=args.url,
+                    max_users=args.max_users,
+                    model=args.model,
+                    channel=getattr(args, 'channel', None),
+                    requests_per_user=getattr(args, 'requests_per_user', None),
+                    headless=headless,
+                    slow_mo=getattr(args, 'slow_mo', 0),
+                    browser_timeout=getattr(args, 'browser_timeout', None),
+                    first_token_timeout=getattr(args, 'first_token_timeout', None),
+                    completion_timeout=getattr(args, 'completion_timeout', None),
+                    capture_ui_success_artifacts=getattr(args, 'capture_ui_success_artifacts', False),
+                    capture_network_trace_on_error=getattr(args, 'capture_network_trace_on_error', False),
+                    capture_network_trace_on_success=getattr(args, 'capture_network_trace_on_success', False),
+                    network_trace_max_entries=getattr(args, 'network_trace_max_entries', None),
+                    pause_after_login=getattr(args, 'pause_after_login', False),
                     auto_scale=auto_scale,
                     response_threshold=getattr(args, 'response_threshold', 1000),
                     step_size=args.step_size,
@@ -598,3 +721,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
